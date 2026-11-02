@@ -22,6 +22,8 @@ class ServerRecording {
 class ServerNarration {
   ServerNarration(this.document);
   final OfflineDocument document;
+  static String pendingKey(OfflineDocument document) =>
+      'pending-server-audio:${document.key}';
   Directory get directory => Directory(
     p.join(
       document.directory.parent.parent.path,
@@ -66,6 +68,7 @@ class ServerNarration {
     Json payload, {
     required bool Function() canceled,
     required void Function(String message, double? progress) onProgress,
+    Future<void> Function()? onServerStarted,
     Duration pollInterval = const Duration(seconds: 2),
   }) async {
     final plan = object(payload['plan']);
@@ -115,6 +118,7 @@ class ServerNarration {
     };
     var action = 'start';
     var retried = false;
+    var announced = false;
     Json snapshot = {};
     while (!canceled()) {
       snapshot = await api.post('/api/tts/export/resolve', {
@@ -143,6 +147,11 @@ class ServerNarration {
           'Server preparation $state. ${object(generation['issue'])['message'] ?? 'Resume later; cached passages are kept.'}',
         );
       }
+      if (!announced) {
+        await onServerStarted?.call();
+        announced = true;
+      }
+      if (canceled()) return false;
       if (state == 'complete') {
         if (skipped > 0) {
           if (retried) {

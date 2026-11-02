@@ -14,11 +14,22 @@ Future<void> showPrepareAudio(
   BuildContext context,
   OfflineDocument document,
   String voice,
-) => showDialog<void>(
-  context: context,
-  barrierDismissible: false,
-  builder: (_) => _PrepareAudioDialog(document: document, voice: voice),
-);
+) async {
+  final hidden = await showDialog<bool>(
+    context: context,
+    barrierDismissible: false,
+    builder: (_) => _PrepareAudioDialog(document: document, voice: voice),
+  );
+  if (hidden == true && context.mounted) {
+    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+      const SnackBar(
+        content: Text(
+          'Server work continues. Reopen Prepare entire PDF audio and tap Resume to check progress and finish downloading.',
+        ),
+      ),
+    );
+  }
+}
 
 class _PrepareAudioDialog extends StatefulWidget {
   const _PrepareAudioDialog({required this.document, required this.voice});
@@ -37,6 +48,37 @@ class _PrepareAudioDialogState extends State<_PrepareAudioDialog> {
   String? _serverStatus;
   double? _serverProgress;
   bool _serverComplete = false;
+  bool _serverStarted = false;
+  bool _serverPending = false;
+  bool _generatorChosen = false;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_restorePending());
+  }
+
+  Future<void> _restorePending() async {
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      if (mounted &&
+          !_running &&
+          !_generatorChosen &&
+          preferences.getBool(ServerNarration.pendingKey(widget.document)) ==
+              true) {
+        setState(() {
+          _generator = 'server';
+          _serverPending = true;
+        });
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(
+          () => _error = 'Could not restore the preparation reminder: $error',
+        );
+      }
+    }
+  }
 
   Future<void> _prepareServer() async {
     final preferences = await SharedPreferences.getInstance();
@@ -110,6 +152,22 @@ class _PrepareAudioDialogState extends State<_PrepareAudioDialog> {
         api,
         payload,
         canceled: () => _cancel || !mounted,
+        onServerStarted: () async {
+          if (!await preferences.setBool(
+            ServerNarration.pendingKey(widget.document),
+            true,
+          )) {
+            throw const ReaderException(
+              'Server started, but its resume reminder could not be saved.',
+            );
+          }
+          if (mounted) {
+            setState(() {
+              _serverStarted = true;
+              _serverPending = true;
+            });
+          }
+        },
         onProgress: (message, progress) {
           if (mounted) {
             setState(() {
@@ -128,6 +186,13 @@ class _PrepareAudioDialogState extends State<_PrepareAudioDialog> {
             'Audio saved, but the playback source preference could not be saved.',
           );
         }
+        if (!await preferences.remove(
+          ServerNarration.pendingKey(widget.document),
+        )) {
+          throw const ReaderException(
+            'Audio saved, but its pending reminder could not be cleared.',
+          );
+        }
         if (mounted) setState(() => _serverComplete = true);
       }
     } finally {
@@ -139,17 +204,20 @@ class _PrepareAudioDialogState extends State<_PrepareAudioDialog> {
     setState(() {
       _running = true;
       _cancel = false;
+      _serverStarted = false;
       _error = null;
     });
     final engine = OfflineVoiceEngine(
       OfflineStore(widget.document.directory.parent.parent),
     );
+    var phoneWakeLock = false;
     try {
-      await WakelockPlus.enable();
       if (_generator == 'server') {
         await _prepareServer();
         return;
       }
+      await WakelockPlus.enable();
+      phoneWakeLock = true;
       final narration = SavedNarration(widget.document, widget.voice);
       final progress = await narration.prepare(
         (text) => engine.synthesize(text, widget.voice),
@@ -174,12 +242,17 @@ class _PrepareAudioDialogState extends State<_PrepareAudioDialog> {
       if (mounted) setState(() => _error = 'Audio preparation failed: $error');
     } finally {
       await engine.close();
-      await WakelockPlus.disable();
+      if (phoneWakeLock) await WakelockPlus.disable();
       if (mounted) setState(() => _running = false);
     }
   }
 
   void _stop() => setState(() => _cancel = true);
+  void _hide() {
+    _cancel = true;
+    Navigator.pop(context, true);
+  }
+
   @override
   void dispose() {
     _cancel = true;
@@ -190,7 +263,13 @@ class _PrepareAudioDialogState extends State<_PrepareAudioDialog> {
   Widget build(BuildContext context) => PopScope(
     canPop: !_running,
     onPopInvokedWithResult: (didPop, result) {
-      if (!didPop && _running) _stop();
+      if (!didPop && _running) {
+        if (_generator == 'server' && _serverStarted) {
+          _hide();
+        } else {
+          _stop();
+        }
+      }
     },
     child: AlertDialog(
       title: const Text('Prepare entire PDF audio'),
@@ -202,6 +281,7 @@ class _PrepareAudioDialogState extends State<_PrepareAudioDialog> {
             Text('${widget.document.document['name']}'),
             const SizedBox(height: 8),
             DropdownButtonFormField<String>(
+              key: ValueKey('preparation-generator-$_generator'),
               initialValue: _generator,
               decoration: const InputDecoration(
                 labelText: 'Generate audio using',
@@ -219,6 +299,7 @@ class _PrepareAudioDialogState extends State<_PrepareAudioDialog> {
               onChanged: _running
                   ? null
                   : (value) => setState(() {
+                      _generatorChosen = true;
                       _generator = value!;
                       _error = null;
                     }),
@@ -237,8 +318,16 @@ class _PrepareAudioDialogState extends State<_PrepareAudioDialog> {
                         'Keep this screen open; stopped or interrupted work can resume.'
                   : 'Generate on your server, then download the complete MP3 and PDF word timings '
                         'to this phone. Playback needs no server, internet, or voice pack. '
-                        'Stopping here pauses the download; server generation can continue. Resume later to finish.',
+                        'Once the server starts, tap Hide to keep using the app. Server generation continues. '
+                        'Hiding pauses downloads to this phone; reopen this screen and tap Resume to finish.',
             ),
+            if (_generator == 'server' &&
+                _serverPending &&
+                !_running &&
+                !_serverComplete)
+              const Text(
+                'Server audio is pending. Tap Resume to check progress and finish downloading.',
+              ),
             if (_generator == 'server' && _serverStatus != null) ...[
               const SizedBox(height: 12),
               Text(_serverStatus!, key: const Key('server-audio-progress')),
@@ -282,6 +371,12 @@ class _PrepareAudioDialogState extends State<_PrepareAudioDialog> {
         ),
       ),
       actions: [
+        if (_running && _generator == 'server')
+          TextButton(
+            key: const Key('hide-server-preparation'),
+            onPressed: _serverStarted ? _hide : null,
+            child: const Text('Hide'),
+          ),
         if (_running)
           TextButton(
             onPressed: _cancel ? null : _stop,
@@ -299,7 +394,11 @@ class _PrepareAudioDialogState extends State<_PrepareAudioDialog> {
           FilledButton(
             key: const Key('start-prepare-audio'),
             onPressed: _prepare,
-            child: Text(_progress == null ? 'Prepare all audio' : 'Resume'),
+            child: Text(
+              _progress == null && !(_generator == 'server' && _serverPending)
+                  ? 'Prepare all audio'
+                  : 'Resume',
+            ),
           ),
       ],
     ),

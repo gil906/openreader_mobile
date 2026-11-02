@@ -3,7 +3,7 @@ FROM nginx:1.28.3-alpine@sha256:a8b39bd9cf0f83869a2162827a0caf6137ddf759d50a1714
 COPY container/nginx.conf /etc/nginx/conf.d/default.conf
 COPY dist/index.html /usr/share/nginx/html/index.html
 COPY dist/SHA256SUMS /usr/share/nginx/html/SHA256SUMS
-COPY dist/OpenReader-Native-v1.3.0.apk /usr/share/nginx/html/OpenReader-Native-v1.3.0.apk
+COPY dist/OpenReader-Native-v1.3.1.apk /usr/share/nginx/html/OpenReader-Native-v1.3.1.apk
 COPY dist/OpenReader-Native-source.zip /usr/share/nginx/html/OpenReader-Native-source.zip
 COPY dist/kokoro-english-v1.zip /usr/share/nginx/html/kokoro-english-v1.zip
 RUN cd /usr/share/nginx/html \

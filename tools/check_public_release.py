@@ -26,9 +26,9 @@ import zlib
 
 VOICE_NAME = "kokoro-english-v1.zip"
 VOICE_SHA256 = "abaff9787f8b73c28dc2876c7610bcc162b0fc29cd6fa7556af72e20b8f9e8d7"
-CONTAINER_NAME = "openreader_mobile-container-v1.3.0.tar.gz"
-CONTAINER_SHA256 = "a8e456420ea1bd9307e3496a4be9fa35c061766bc9f3f8b278cf7bbb82bde85f"
-CONTAINER_TAG = "ghcr.io/gil906/openreader_mobile:v1.3.0"
+CONTAINER_NAME = "openreader_mobile-container-v1.3.1.tar.gz"
+CONTAINER_SHA256 = "6e0d1579b9a7b06e5de9fc3e56995ea0adf402cafe2712aa9f3f6e8bb3f5d910"
+CONTAINER_TAG = "ghcr.io/gil906/openreader_mobile:v1.3.1"
 CONTAINER_BASE_DIFF_IDS = (
     "sha256:989e799e634906e94dc9a5ee2ee26fc92ad260522990f26e707861a5f52bf64e",
     "sha256:a2738b08d7114c9d5581dd5482d3b5cc297fcf73b8d330c3ba38d24c43939119",
@@ -49,7 +49,7 @@ PUBLIC_BASE_NETWORK_METADATA_SHA256 = {
     "c5eb5a4cc76a5cdb16e79864b9ccd26c3553f0c396d0a21bafb7be71c1efcd8c",
     "9b7842af4ef67bdf99fb8d1e53fe8896efdf89849875dcfa055c50910ac6c581",
 }
-CONTAINER_INSTALLERS = ("OpenReader-Native-v1.3.0.apk", "OpenReader-Native-source.zip", VOICE_NAME)
+CONTAINER_INSTALLERS = ("OpenReader-Native-v1.3.1.apk", "OpenReader-Native-source.zip", VOICE_NAME)
 APPROVED_SOURCE_BINARIES = {
     "android_app/android/gradle/wrapper/gradle-wrapper.jar":
         "16caeaf66d57a0d1d2087fef6a97efa62de8da69afa5b908f40db35afc4342da",

@@ -10,6 +10,47 @@ import 'package:openreader_native/offline_store.dart';
 import 'package:openreader_native/server_narration.dart';
 
 void main() {
+  test('hiding after server admission cancels only local monitoring, not the server job', () async {
+    final root = await Directory.systemTemp.createTemp('server-hide-');
+    addTearDown(() => root.delete(recursive: true));
+    final doc = await OfflineStore(root).save(
+      origin: 'https://reader.example.com',
+      account: 'owner',
+      document: {'id': 'demo', 'name': 'Demo.pdf'},
+      payload: _payload(),
+      bytes: Uint8List.fromList(utf8.encode('%PDF-1.7\nsynthetic')),
+    );
+    final actions = <String>[];
+    var hidden = false;
+    final api = OpenReaderApi(
+      Uri.parse(doc.origin),
+      client: MockClient((request) async {
+        actions.add(object(jsonDecode(request.body))['action'] as String);
+        return _json({
+          ..._snapshot(),
+          'generation': {'state': 'generating'},
+          'artifact': {'state': 'none'},
+        });
+      }),
+    );
+    addTearDown(api.close);
+    final cache = ServerNarration(doc);
+    expect(
+      await cache.prepare(
+        api,
+        _payload(),
+        canceled: () => hidden,
+        onServerStarted: () async {
+          hidden = true;
+        },
+        onProgress: (_, _) {},
+        pollInterval: Duration.zero,
+      ),
+      isFalse,
+    );
+    expect(actions, ['start']);
+    expect(await cache.load(), isNull);
+  });
   test('server preparation saves canonical timing and complete MP3 without phone voices', () async {
     final root = await Directory.systemTemp.createTemp('server-book-');
     addTearDown(() => root.delete(recursive: true));

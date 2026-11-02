@@ -331,6 +331,13 @@ class _OfflineLibraryPageState extends State<OfflineLibraryPage> {
       if (await serverDirectory.exists()) {
         await serverDirectory.delete(recursive: true);
       }
+      if (!await widget.preferences.remove(
+        ServerNarration.pendingKey(document),
+      )) {
+        throw const ReaderException(
+          'Audio removed, but the server preparation reminder could not be cleared.',
+        );
+      }
       if (!await widget.preferences.remove('offline-source:${document.key}')) {
         throw const ReaderException(
           'Audio removed, but the source preference could not be cleared.',
@@ -467,6 +474,11 @@ class _OfflineLibraryPageState extends State<OfflineLibraryPage> {
                 subtitle: Text(
                   _serverRecordings.contains(document.key)
                       ? 'PDF + server voice saved / ready offline'
+                      : widget.preferences.getBool(
+                              ServerNarration.pendingKey(document),
+                            ) ==
+                            true
+                      ? 'Server audio pending / reopen preparation to resume'
                       : _narrations[document.key]?.complete == true
                       ? 'PDF + all ${offlineVoices[_voice]?.split(' / ').first} audio saved'
                       : '${_narrations[document.key]?.completed ?? 0}/${_narrations[document.key]?.total ?? 0} audio passages saved',
