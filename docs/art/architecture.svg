@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="650" viewBox="0 0 1200 650" role="img" aria-labelledby="title description">
+  <title id="title">OpenReader Native privacy and deployment architecture</title>
+  <desc id="description">Offline PDF and audio remain on the phone. Optional explicit uploads reach your OpenReader server and its internal Kokoro provider. A separate static container serves only public installers.</desc>
+  <defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#82e9d1"/></marker></defs>
+  <rect width="1200" height="650" rx="24" fill="#0b1423"/>
+  <g font-family="system-ui,sans-serif" fill="#eaf3ff">
+    <text x="45" y="55" font-size="25" font-weight="700">Two reading paths. One explicit privacy boundary.</text>
+    <rect x="44" y="95" width="380" height="440" rx="20" fill="#123131" stroke="#82e9d1"/>
+    <text x="70" y="137" font-size="23" font-weight="700">YOUR ANDROID PHONE</text>
+    <text x="70" y="185" font-size="18">Saved / imported PDF</text>
+    <text x="70" y="222" font-size="18">20 English Kokoro voices</text>
+    <text x="70" y="259" font-size="18">Pinned downloadable voice pack</text>
+    <text x="70" y="312" font-size="18">Full-PDF audio preparation</text>
+    <text x="70" y="349" font-size="18">Per-voice cache + queued playback</text>
+    <text x="70" y="408" font-size="17" fill="#82e9d1">OFFLINE: document + audio stay here</text>
+    <text x="70" y="441" font-size="16" fill="#adc7d0">After model and PDF are saved,</text>
+    <text x="70" y="468" font-size="16" fill="#adc7d0">no server connection is needed.</text>
+    <rect x="670" y="95" width="485" height="280" rx="20" fill="#18253e" stroke="#8ba9ff"/>
+    <text x="695" y="137" font-size="23" font-weight="700">YOUR OPTIONAL SERVER</text>
+    <text x="695" y="185" font-size="18">OpenReader v5.4.1 + embedded worker</text>
+    <text x="695" y="225" font-size="17">Private persistent ./data mount</text>
+    <path d="M912 244V273" stroke="#82e9d1" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="695" y="285" width="435" height="62" rx="12" fill="#24374c"/>
+    <text x="716" y="324" font-size="18">Kokoro FastAPI v0.2.4 · internal only</text>
+    <path d="M427 210H657" stroke="#82e9d1" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="448" y="179" font-size="16">Only when selected</text>
+    <text x="448" y="245" font-size="15" fill="#adc7d0">Local PDF upload:</text>
+    <text x="448" y="270" font-size="15" fill="#adc7d0">explicit consent</text>
+    <rect x="670" y="410" width="485" height="150" rx="20" fill="#1e2732" stroke="#8b9bad"/>
+    <text x="695" y="450" font-size="21" font-weight="700">PUBLIC DOWNLOADS · :3005 → :80</text>
+    <text x="695" y="488" font-size="17">APK + voice pack + matching source</text>
+    <text x="695" y="524" font-size="16" fill="#adc7d0">Static nginx · no uploads or user data</text>
+    <path d="M670 506H438" stroke="#82e9d1" stroke-width="2" marker-end="url(#arrow)" stroke-dasharray="7 6"/>
+    <text x="45" y="607" font-size="17" fill="#adc7d0">Installer assets can also come from the public GitHub release. No documents belong in git, releases, or images.</text>
+  </g>
+</svg>

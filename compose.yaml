@@ -1,0 +1,42 @@
+name: openreader-public
+services:
+  openreader:
+    image: ghcr.io/richardr1126/openreader:v5.4.1
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3003:3003"
+      - "127.0.0.1:8081:8081"
+    environment:
+      BASE_URL: ${SERVER_URL:-http://localhost:3003}
+      COMPUTE_WORKER_HOST: 0.0.0.0
+      COMPUTE_WORKER_PUBLIC_URL: ${WORKER_PUBLIC_URL:-http://localhost:8081}
+      API_BASE: http://kokoro:8880/v1
+      API_MODEL_NAME: kokoro
+      AUTH_SECRET: ${AUTH_SECRET:?Set a unique AUTH_SECRET in your local .env}
+      TTS_PLAYBACK_TOKEN_SECRET: ${TTS_PLAYBACK_TOKEN_SECRET:?Set a unique playback secret in your local .env}
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-admin@example.test}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?Set a unique bootstrap password in your local .env}
+      USE_ANONYMOUS_AUTH_SESSIONS: "false"
+      TZ: UTC
+    volumes:
+      - ./data/openreader:/app/docstore
+    depends_on:
+      - kokoro
+  kokoro:
+    image: ghcr.io/remsky/kokoro-fastapi-cpu:v0.2.4
+    restart: unless-stopped
+    expose:
+      - "8880"
+    environment:
+      API_LOG_LEVEL: INFO
+      COMPUTE_PREWARM_MODELS: "true"
+    # Internal-only: no host port, credentials, or personal documents in the image.
+  downloads:
+    extends:
+      file: compose.downloads.yaml
+      service: downloads
+    build:
+      context: .
+      dockerfile: Dockerfile
+    profiles:
+      - downloads

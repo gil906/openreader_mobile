@@ -1,0 +1,29 @@
+OpenReader Native
+Copyright 2026 OpenReader Native contributors.
+
+This native client is distributed under GPL-3.0-or-later.
+The GPL license is in LICENSE. This is an unofficial independent client,
+not an official OpenReader release.
+
+Offline speech uses sherpa-onnx (Apache-2.0), Kokoro-82M (Apache-2.0),
+and eSpeak-NG pronunciation components (GPL-3.0-or-later).
+License copies are bundled under assets/licenses and visible in the app.
+Other Flutter dependencies retain their respective licenses.
+
+Corresponding sources and model resources:
+  This client: OpenReader-Native-source.zip beside the APK download.
+  https://github.com/k2-fsa/sherpa-onnx
+  https://pub.dev/packages/sherpa_onnx/versions/2.0.1
+  https://github.com/espeak-ng/espeak-ng
+  https://huggingface.co/hexgrad/Kokoro-82M
+  https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models
+
+The English offline pack is made from kokoro-multi-lang-v1_0.tar.bz2
+without quantizing the model. Its upstream LICENSE and README are kept
+in the pack. No cloud API keys, passwords, or licensed celebrity voices
+are included.
+
+To build the client, install Flutter and an Android SDK, run flutter pub get,
+and use flutter run for a debug build. A release build requires your own
+android/key.properties and signing keystore; private signing keys are
+intentionally not included in the source archive.

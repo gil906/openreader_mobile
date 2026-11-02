@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="560" viewBox="0 0 1280 560" role="img" aria-labelledby="title description">
+  <title id="title">OpenReader Native — read it, hear it, keep it yours</title>
+  <desc id="description">Original geometric illustration of a glowing book flowing into audio waves and a phone, on a dark background.</desc>
+  <defs>
+    <linearGradient id="bg" x2="1" y2="1"><stop stop-color="#081320"/><stop offset="1" stop-color="#172840"/></linearGradient>
+    <linearGradient id="ink" x2="1" y2="1"><stop stop-color="#7ff5d5"/><stop offset="1" stop-color="#8ba9ff"/></linearGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" fill="none" stroke="#93b3d4" stroke-opacity=".06"/></pattern>
+  </defs>
+  <rect width="1280" height="560" rx="28" fill="url(#bg)"/>
+  <rect width="1280" height="560" rx="28" fill="url(#grid)"/>
+  <circle cx="1050" cy="260" r="205" fill="#6de5cc" opacity=".04"/>
+  <circle cx="1050" cy="260" r="150" fill="none" stroke="#80ecd4" stroke-opacity=".13"/>
+  <g font-family="system-ui,sans-serif">
+    <text x="72" y="92" fill="#7ff5d5" font-size="16" letter-spacing="4">OPENREADER / NATIVE ANDROID</text>
+    <text x="68" y="190" fill="#f3f8ff" font-size="68" font-weight="750">Read it.</text>
+    <text x="68" y="270" fill="#f3f8ff" font-size="68" font-weight="750">Hear it.</text>
+    <text x="68" y="350" fill="url(#ink)" font-size="68" font-weight="750">Keep it yours.</text>
+    <text x="72" y="414" fill="#acc0d9" font-size="22">PDF read-along. Local voices. Your choice.</text>
+    <rect x="72" y="452" width="294" height="40" rx="20" fill="#7ff5d5" fill-opacity=".09" stroke="#7ff5d5" stroke-opacity=".3"/>
+    <text x="92" y="478" fill="#aaf5e2" font-size="15" letter-spacing="1">GPL-3.0-OR-LATER / API 24+</text>
+  </g>
+  <g transform="translate(770 126)">
+    <path d="M-25 115Q30 84 90 114V286Q30 256-25 286Z" fill="#1e3c4c" stroke="#7ff5d5" stroke-width="3"/>
+    <path d="M90 114Q150 84 205 115V286Q150 256 90 286Z" fill="#20354b" stroke="#8ba9ff" stroke-width="3"/>
+    <path d="M-1 140L63 142M-1 163L63 165M-1 186L63 188M-1 209L47 211M114 142L180 140M114 165L180 163" fill="none" stroke="#b3d0e0" stroke-width="5" stroke-linecap="round"/>
+    <rect x="109" y="181" width="75" height="16" rx="6" fill="#7ff5d5" opacity=".6"/>
+    <rect x="184" y="-25" width="156" height="300" rx="25" fill="#0b1626" stroke="#8ba9ff" stroke-width="3" transform="rotate(10 262 125)"/>
+    <g transform="rotate(10 262 125)">
+      <rect x="236" y="-10" width="52" height="7" rx="3" fill="#31465f"/>
+      <path d="M211 48H310M211 70H310M211 92H280" stroke="#506984" stroke-width="6" stroke-linecap="round"/>
+      <rect x="207" y="114" width="105" height="22" rx="6" fill="#7ff5d5" opacity=".7"/>
+      <path d="M218 181V206M234 166V221M250 151V236M266 172V215M282 159V228M298 181V206" stroke="url(#ink)" stroke-width="6" stroke-linecap="round"/>
+      <circle cx="262" cy="252" r="11" fill="#7ff5d5"/>
+      <path d="M259 247L267 252L259 257Z" fill="#0b1626"/>
+    </g>
+  </g>
+</svg>

@@ -1,0 +1,11 @@
+# Positive allowlist: Docker must never receive the source tree or runtime data.
+**
+!Dockerfile
+!container/
+!container/nginx.conf
+!dist/
+!dist/index.html
+!dist/SHA256SUMS
+!dist/OpenReader-Native-v1.2.0.apk
+!dist/OpenReader-Native-source.zip
+!dist/kokoro-english-v1.zip
