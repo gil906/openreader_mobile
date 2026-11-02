@@ -24,6 +24,7 @@ ASSETS = (
     "OpenReader-Native-source.zip",
     "kokoro-english-v1.zip",
 )
+CONTAINER_ASSET = "openreader_mobile-container-v1.2.0.tar.gz"
 
 
 def digest(path: Path) -> str:
@@ -56,9 +57,17 @@ def checksums(path: Path) -> dict[str, str]:
         if name in result:
             raise ValueError("duplicate checksum entry")
         result[name] = sha.lower()
-    if set(result) != set(ASSETS):
-        raise ValueError("checksum manifest must contain exactly the three curated assets")
+    required = set(ASSETS)
+    if not required <= set(result) or set(result) - required - {CONTAINER_ASSET}:
+        raise ValueError("checksum manifest requires the three installers and permits only the known container archive")
     return result
+
+
+def load_guard():
+    spec = importlib.util.spec_from_file_location("public_guard", ROOT / "tools/check_public_release.py")
+    guard = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(guard)
+    return guard
 
 
 def main() -> int:
@@ -72,9 +81,7 @@ def main() -> int:
     source = args.from_dir.resolve() if args.from_dir else None
     dist.mkdir()
     try:
-        spec = importlib.util.spec_from_file_location("public_guard", ROOT / "tools/check_public_release.py")
-        guard = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(guard)
+        guard = load_guard()
         expected = checksums(args.checksums) if args.checksums else None
         if source is None and expected is None:
             fetch("SHA256SUMS", dist / "SHA256SUMS")

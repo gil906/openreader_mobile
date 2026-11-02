@@ -4,11 +4,14 @@ import contextlib
 import hashlib
 import importlib.util
 import io
+import json
 from pathlib import Path
 import shutil
 import struct
 import subprocess
 import sys
+import tarfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 import zipfile
@@ -376,15 +379,196 @@ class PrivacyTests(unittest.TestCase):
         self.assertFalse((project / "dist").exists())
         self.assertIn("incomplete dist removed", output.getvalue())
 
-    def test_checksum_manifest_requires_exact_curated_names(self):
+    def test_checksum_manifest_accepts_only_known_optional_container(self):
         manifest = self.write(
             "SHA256SUMS",
             "".join("0" * 64 + "  " + name + "\n" for name in prepare.ASSETS).encode(),
         )
         self.assertEqual(set(prepare.checksums(manifest)), set(prepare.ASSETS))
-        manifest.write_text("0" * 64 + "  ../escape\n")
-        with self.assertRaises(ValueError):
-            prepare.checksums(manifest)
+        manifest.write_text(manifest.read_text() + "0" * 64 + "  " + prepare.CONTAINER_ASSET + "\n")
+        self.assertEqual(set(prepare.checksums(manifest)), set(prepare.ASSETS) | {prepare.CONTAINER_ASSET})
+
+    def test_checksum_manifest_rejects_extra_duplicate_and_missing_names(self):
+        required = "".join("0" * 64 + "  " + name + "\n" for name in prepare.ASSETS)
+        container = "0" * 64 + "  " + prepare.CONTAINER_ASSET + "\n"
+        invalid = [
+            required + "0" * 64 + "  unexpected.zip\n",
+            required + "0" * 64 + "  openreader_mobile-container-v1.2.1.tar.gz\n",
+            required + "0" * 64 + "  ../escape\n",
+            required + container + container,
+            required + "0" * 64 + "  " + prepare.ASSETS[0] + "\n",
+            "0" * 64 + "  " + prepare.ASSETS[0] + "\n" + container,
+        ]
+        for value in invalid:
+            with self.subTest(kind=invalid.index(value)):
+                manifest = self.write("SHA256SUMS", value.encode())
+                with self.assertRaises(ValueError):
+                    prepare.checksums(manifest)
+
+    def test_preparation_omits_container_and_writes_three_entry_manifest(self):
+        payloads = {name: ("synthetic " + name).encode() for name in prepare.ASSETS}
+        payloads[prepare.CONTAINER_ASSET] = b"must not copy or download this archive"
+        manifest = "".join(
+            hashlib.sha256(value).hexdigest() + "  " + name + "\n"
+            for name, value in payloads.items()
+        ).encode()
+        source = self.root / "input"
+        source.mkdir()
+        for name, value in payloads.items():
+            (source / name).write_bytes(value)
+        (source / "SHA256SUMS").write_bytes(manifest)
+
+        for mode in ("local", "download"):
+            with self.subTest(mode=mode):
+                project = self.root / mode
+                (project / "container").mkdir(parents=True)
+                (project / "container/index.html").write_text("<p>Synthetic installer fixture</p>")
+                scanned, fetched = [], []
+                scanner = SimpleNamespace(errors=set(), artifact=lambda path: scanned.append(path.name))
+
+                def fetch(name, destination):
+                    self.assertNotEqual(name, prepare.CONTAINER_ASSET)
+                    fetched.append(name)
+                    destination.write_bytes(manifest if name == "SHA256SUMS" else payloads[name])
+
+                args = ["prepare-downloads.py"]
+                if mode == "local":
+                    args += ["--from-dir", str(source), "--checksums", str(source / "SHA256SUMS")]
+                with mock.patch.object(prepare, "ROOT", project), mock.patch.object(
+                    prepare, "load_guard", return_value=SimpleNamespace(Scanner=lambda: scanner)
+                ), mock.patch.object(prepare, "fetch", side_effect=fetch), mock.patch.object(
+                    sys, "argv", args
+                ), contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(prepare.main(), 0)
+                dist = project / "dist"
+                self.assertEqual({path.name for path in dist.iterdir()}, set(prepare.ASSETS) | {"SHA256SUMS", "index.html"})
+                self.assertEqual(set(prepare.checksums(dist / "SHA256SUMS")), set(prepare.ASSETS))
+                self.assertEqual(set(scanned), set(prepare.ASSETS))
+                self.assertEqual(set(fetched), set() if mode == "local" else set(prepare.ASSETS) | {"SHA256SUMS"})
+
+    def container_fixture(self, changes=None, history=None, deny=None, wrong_layer=False):
+        def zip_bytes(entries):
+            output = io.BytesIO()
+            with zipfile.ZipFile(output, "w") as archive:
+                for name, value in entries:
+                    archive.writestr(name, value)
+            return output.getvalue()
+
+        payloads = {
+            prepare.ASSETS[0]: zip_bytes([("AndroidManifest.xml", b"synthetic")]),
+            prepare.ASSETS[1]: zip_bytes([("android_app/README.md", b"synthetic")]),
+            prepare.ASSETS[2]: zip_bytes([("dictionary.txt", b"public ordinary brand words")]),
+        }
+        voice_hash = hashlib.sha256(payloads[prepare.ASSETS[2]]).hexdigest()
+        web = "usr/share/nginx/html/"
+        files = {web + name: value for name, value in payloads.items()}
+        files.update({web + "index.html": b"<p>Synthetic installer</p>", "etc/nginx/conf.d/default.conf": b"server {}"})
+        files.update(changes or {})
+        files[web + "SHA256SUMS"] = "".join(
+            hashlib.sha256(files[web + name]).hexdigest() + "  " + name + "\n"
+            for name in prepare.ASSETS
+        ).encode()
+        layer_data = io.BytesIO()
+        with tarfile.open(fileobj=layer_data, mode="w") as layer:
+            for name, value in files.items():
+                member = tarfile.TarInfo(name)
+                if value is None:
+                    member.type, member.linkname = tarfile.SYMTYPE, "/outside"
+                    layer.addfile(member)
+                else:
+                    member.size = len(value)
+                    layer.addfile(member, io.BytesIO(value))
+        layer = layer_data.getvalue()
+        config = {
+            "os": "linux", "architecture": "amd64",
+            "rootfs": {"diff_ids": ["sha256:" + ("0" * 64 if wrong_layer else hashlib.sha256(layer).hexdigest())]},
+            "config": {"Env": [], "Labels": {}, "Entrypoint": ["nginx"], "Cmd": ["-g", "daemon off;"]},
+            "history": [{"created_by": value} for value in (history or [])],
+        }
+        manifest = [{"RepoTags": [guard.CONTAINER_TAG], "Config": "config.json", "Layers": ["layer.tar"]}]
+        path = self.root / guard.CONTAINER_NAME
+        with tarfile.open(path, "w:gz") as archive:
+            for name, value in {
+                "config.json": json.dumps(config).encode(), "manifest.json": json.dumps(manifest).encode(),
+                "layer.tar": layer,
+            }.items():
+                member = tarfile.TarInfo(name)
+                member.size = len(value)
+                archive.addfile(member, io.BytesIO(value))
+        canonical = lambda value: hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        with mock.patch.multiple(
+            guard, CONTAINER_SHA256=hashlib.sha256(path.read_bytes()).hexdigest(),
+            CONTAINER_BASE_DIFF_IDS=(), CONTAINER_ENV_SHA256=canonical([]),
+            CONTAINER_LABELS_SHA256=canonical({}), VOICE_SHA256=voice_hash,
+        ):
+            scanner = guard.Scanner(deny)
+            scanner.artifact(path)
+        return scanner, path
+
+    def test_pinned_container_payloads_and_no_blanket_tar_allowance(self):
+        scanner, path = self.container_fixture()
+        self.assertFalse(scanner.errors)
+        scanner = guard.Scanner()
+        scanner.artifact(path)
+        self.assertTrue(scanner.errors)  # Production archive hash was not overridden.
+        renamed = path.with_name("unreviewed.tar.gz")
+        path.rename(renamed)
+        scanner = guard.Scanner()
+        scanner.artifact(renamed)
+        self.assertTrue(scanner.errors)
+
+    def test_container_rejects_docs_traversal_links_and_bad_layer_digest(self):
+        for name, value in [
+            ("usr/share/nginx/html/private" + ".pdf", b"synthetic"),
+            ("../escape", b"synthetic"),
+            ("data/state.json", b"synthetic"),
+            ("usr/share/nginx/html/link", None),
+        ]:
+            with self.subTest(name=name):
+                scanner, _ = self.container_fixture({name: value})
+                self.assertTrue(scanner.errors)
+        scanner, _ = self.container_fixture(wrong_layer=True)
+        self.assertTrue(scanner.errors)
+
+    def test_container_checks_raw_secrets_private_values_and_history(self):
+        path = "usr/share/nginx/html/index.html"
+        for value in [
+            b"ghp_" + b"Z" * 36,
+            ("http://" + "192." + "168.50.20").encode(),
+            b"-----BEGIN " + b"PRIVATE KEY-----",
+        ]:
+            with self.subTest(kind=value[:5]):
+                scanner, _ = self.container_fixture({path: value})
+                self.assertTrue(scanner.errors)
+        value = b"synthetic-local-deny-value"
+        scanner, _ = self.container_fixture({path: value}, deny=[value])
+        self.assertTrue(scanner.errors)
+        scanner, _ = self.container_fixture(history=["RUN API_" + "KEY=opaque-private-value"])
+        self.assertTrue(scanner.errors)
+
+    def test_container_validates_nested_installer_and_pinned_voice(self):
+        bad_apk = io.BytesIO()
+        with zipfile.ZipFile(bad_apk, "w") as archive:
+            archive.writestr("assets/private" + ".pdf", b"synthetic")
+        scanner, _ = self.container_fixture({"usr/share/nginx/html/" + prepare.ASSETS[0]: bad_apk.getvalue()})
+        self.assertTrue(scanner.errors)
+        scanner, _ = self.container_fixture({"usr/share/nginx/html/" + prepare.ASSETS[2]: b"not the pinned voice"})
+        self.assertTrue(scanner.errors)
+
+    def test_public_base_metadata_never_waives_explicit_owner_values(self):
+        value = b"r" + b".internal"
+        scanner = guard.Scanner()
+        scanner.text(value, "public-base", critical_only=True, public_base=True)
+        self.assertFalse(scanner.errors)
+        scanner = guard.Scanner([value])
+        scanner.text(value, "public-base", critical_only=True, public_base=True)
+        self.assertTrue(scanner.errors)
+        scanner = guard.Scanner()
+        scanner.text(value, "added-file", critical_only=True)
+        self.assertTrue(scanner.errors)
+        scanner = guard.Scanner()
+        scanner.text(("192." + "168.50.20").encode(), "public-base", critical_only=True, public_base=True)
+        self.assertTrue(scanner.errors)
 
     def test_denylist_and_redacted_diagnostics(self):
         value = b"synthetic-private-value"

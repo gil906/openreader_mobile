@@ -93,3 +93,46 @@ The voice ZIP retains its separate exact hash requirement. No keyword blacklist
 classifies ordinary model dictionary/brand words as private documents.
 Always rerun artifact scans with the maintainer's explicit private-value inputs,
 without logging them, and review final assets rather than an older candidate.
+
+## Audited public installer container
+
+The Docker-save artifact checker accepts only:
+
+```text
+openreader_mobile-container-v1.2.0.tar.gz
+SHA-256: 637e974cc29c50ab4c859b11c33447928fe8ab9fbbaf6384dcd53d06118ae231
+Platform: linux/amd64
+Tag: ghcr.io/gil906/openreader_mobile:v1.2.0
+```
+
+This exact archive was built from the curated installer dist, HTTP/range tested,
+round-trip loaded with Docker, and audited layer by layer. The checker performs
+the structural/payload audit again without extracting any tar member:
+
+- Require the exact public tag, platform, archive hash and eight pinned nginx
+  base-layer diff IDs. Rehash every decompressed layer against the image config.
+- Require the image environment/labels to match the verified public nginx base.
+  Scan config/history for explicit private literals, strong secret formats and
+  credential assignments, without treating public upstream attribution as owner
+  data.
+- Scan raw layer bytes, including boundary overlap, for explicit deny literals,
+  strong secret formats and private-network information. The exact public base
+  has provenance-scoped OS paths/symlinks and crypto parser PEM-header constants;
+  those are not user runtime data or owner signing keys. Explicit local deny
+  literals still apply to all bytes. Added files get no such key-header waiver.
+  Four exact network-shaped fingerprints from public broadcast/link-local
+  constants, an upstream configuration example and a nginx JavaScript property
+  are also scoped only to those immutable base layers. They do not exempt
+  unknown private addresses/hosts or override an explicit owner-value denylist.
+- Allow only the five installer web files and nginx configuration as added
+  regular files; reject added links, unknown files, traversal, forbidden
+  documents/audio and private/runtime additions.
+- Recheck embedded APK and source ZIP with the ordinary artifact scanner and
+  the model ZIP against its unchanged exact pinned hash. Verify the internal
+  manifest has exactly the three corresponding installer checksums, not the
+  external container line.
+
+The published external `SHA256SUMS` has four asset lines. The image's internal
+manifest has three; the archive is never copied into itself. Native ARM hosts
+can build the multi-platform pinned Dockerfile locally, but a newly distributed
+archive requires its own platform/provenance audit and deliberate pin update.

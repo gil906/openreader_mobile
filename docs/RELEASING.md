@@ -50,10 +50,14 @@ Expected release assets:
    build instructions, using `android_app/` as the native source directory
 3. `kokoro-english-v1.zip` — SHA-256
    `abaff9787f8b73c28dc2876c7610bcc162b0fc29cd6fa7556af72e20b8f9e8d7`
-4. `SHA256SUMS` — exactly the three names above, SHA-256 followed by two spaces
-5. `openreader_mobile-container-v1.2.0.tar.gz` — reviewed `docker save` image,
+4. `openreader_mobile-container-v1.2.0.tar.gz` — reviewed `docker save` image,
    retaining tag `ghcr.io/gil906/openreader_mobile:v1.2.0`
-6. `CONTAINER-SHA256SUMS` — separate checksum manifest for the container archive
+5. `SHA256SUMS` — exactly the four asset names above, SHA-256 followed by two spaces
+
+The internal installer `dist/SHA256SUMS` remains three-entry (APK/source/voice).
+The preparation helper accepts the optional known container line from the
+external manifest, never copies/downloads that archive, and rejects other extra
+names or duplicates.
 
 - [ ] Run `python3 -B tools/test_check_public_release.py`.
 - [ ] Run the root/index/HEAD scanner and `--history` before each push.
@@ -85,15 +89,21 @@ personal company names. Do not change the hash merely to bypass a finding.
       optional upstream server and embedded-worker audio routes. Kokoro remains
       internal-only; the worker's public URL must actually reach the phone.
 - [ ] Export the reviewed tagged image as
-      `openreader_mobile-container-v1.2.0.tar.gz` and provide separate
-      `CONTAINER-SHA256SUMS` as the primary required public container delivery.
+      `openreader_mobile-container-v1.2.0.tar.gz` and append its checksum only
+      to the external four-entry release `SHA256SUMS` as the primary public
+      container delivery. Do not modify the image's three-entry manifest.
       Record its platform, inspect image history and all added layers, and
-      verify public installer checksums. The APK/ZIP scanner does not inspect
-      image archives. Never upload an unchecked image or registry credentials.
+      verify public installer checksums, and scan the final archive with
+      `--artifact`. Only the specifically audited/pinned Docker-save profile
+      is accepted, not arbitrary tar files. Never upload an unchecked image
+      or registry credentials.
 - [ ] Test checksum verification, `docker load`, and
       `docker compose -f compose.downloads.yaml up -d --pull never --no-build`
       without GHCR credentials, a server `.env`, or registry access. Confirm the
       loaded tag is `ghcr.io/gil906/openreader_mobile:v1.2.0`.
+- [ ] Confirm the archive's **linux/amd64** platform is clearly documented, and
+      that native ARM users are directed to build the pinned multi-platform
+      Dockerfile locally from the approved public installer assets.
 - [ ] Treat GHCR delivery as optional. Recommend a registry pull only after
       explicitly verifying anonymous package access; public repository status
       does not establish package visibility. Publication is a separate authorized

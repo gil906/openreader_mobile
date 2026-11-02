@@ -276,16 +276,20 @@ The required container delivery path for v1.2.0 is the public release asset
 **`openreader_mobile-container-v1.2.0.tar.gz`**, exported with `docker save`.
 It does not require GHCR access, a registry login, or an account token.
 
-1. Obtain the public repository checkout or matching source ZIP, including
-   [`compose.downloads.yaml`](compose.downloads.yaml).
+1. Obtain [`compose.downloads.yaml`](compose.downloads.yaml) from the public
+   repository checkout. The release's app-only source ZIP does not contain
+   the deployment files.
 2. From the [v1.2.0 release](https://github.com/gil906/openreader_mobile/releases/tag/v1.2.0),
    download `openreader_mobile-container-v1.2.0.tar.gz` and
-   `CONTAINER-SHA256SUMS`. Check the image platform in the release notes matches
-   your Docker host; the archive does not automatically select an architecture.
+   `SHA256SUMS`. The published archive is **linux/amd64**; it does not
+   automatically select an architecture. Native ARM hosts should rebuild from
+   the public installer assets with the pinned multi-platform Dockerfile on
+   their own host, using the alternative build instructions below.
 3. Verify and load the image, then start the installer service with Compose:
 
 ```sh
-sha256sum -c CONTAINER-SHA256SUMS
+grep -E '^[0-9a-fA-F]{64} [ *]openreader_mobile-container-v1\.2\.0\.tar\.gz$' SHA256SUMS |
+  sha256sum --strict --check -
 gzip -dc openreader_mobile-container-v1.2.0.tar.gz | docker load
 docker compose -f compose.downloads.yaml up -d --pull never --no-build
 ```
@@ -309,11 +313,17 @@ service uses the no-pull policy; the upstream backend/Kokoro services retain
 their normal image setup. Their secrets are not needed for the standalone
 installer-only route.
 
-The image archive and `CONTAINER-SHA256SUMS` are release assets, never git files
-or inputs to `prepare-downloads.py`. Keep their checksum manifest separate:
-installer `SHA256SUMS` deliberately lists only APK, matching source ZIP, and
-voice ZIP. Checksums downloaded alongside an asset establish transfer integrity,
-not independent publisher authenticity.
+The external release `SHA256SUMS` lists exactly four approved assets: APK,
+matching source ZIP, voice ZIP, and container archive. The command above checks
+only the container line, so the other three files need not be downloaded.
+Release binaries never belong in git.
+
+`prepare-downloads.py` accepts that four-entry release manifest or the three-entry
+installer-only form, rejecting unknown extra names and duplicate entries. It
+downloads/copies only APK, source ZIP and voice ZIP, then generates an internal
+three-entry `dist/SHA256SUMS`. The archive and its checksum are never recursively
+included in the image. Checksums downloaded alongside an asset establish
+transfer integrity, not independent publisher authenticity.
 
 ### Maintainers: build from local curated artifacts before release
 
@@ -378,11 +388,20 @@ If the pull fails, use the primary public release image archive above.
 The static server supports ordinary/range downloads and no upload endpoint.
 No automatic publication or GitHub Actions workflow is included here.
 
-The APK/ZIP scanner does **not** inspect Docker archive layers. Before distributing
-an image archive, independently review image history, every added layer, labels
-and build arguments for sensitive content, and verify the served public files
-against the approved installer checksums. A successful `docker load` alone is
-not a privacy check or proof of trust.
+The artifact scanner supports this one audited, SHA-256-pinned **linux/amd64**
+Docker-save archive; it does not blanket-allow tar files:
+
+```sh
+python3 tools/check_public_release.py --artifact openreader_mobile-container-v1.2.0.tar.gz
+```
+
+It reads Docker/OCI metadata and layers without extraction, verifies the pinned
+public nginx base and environment, checks raw private literals/secret patterns,
+rejects forbidden documents and unexpected added files, and rechecks the nested
+APK/source/voice payloads and internal three-entry checksum manifest.
+See [container provenance](docs/BUILD-PROVENANCE.md). A changed archive or another
+platform requires a new provenance review/pin. Independent image/source review
+is still required; `docker load` alone is not a privacy check or proof of trust.
 
 ## Build and run the Android app
 

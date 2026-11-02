@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import gzip
 import io
 import ipaddress
+import json
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -18,11 +20,36 @@ import stat
 import struct
 import subprocess
 import sys
+import tarfile
 import zipfile
 import zlib
 
 VOICE_NAME = "kokoro-english-v1.zip"
 VOICE_SHA256 = "abaff9787f8b73c28dc2876c7610bcc162b0fc29cd6fa7556af72e20b8f9e8d7"
+CONTAINER_NAME = "openreader_mobile-container-v1.2.0.tar.gz"
+CONTAINER_SHA256 = "637e974cc29c50ab4c859b11c33447928fe8ab9fbbaf6384dcd53d06118ae231"
+CONTAINER_TAG = "ghcr.io/gil906/openreader_mobile:v1.2.0"
+CONTAINER_BASE_DIFF_IDS = (
+    "sha256:989e799e634906e94dc9a5ee2ee26fc92ad260522990f26e707861a5f52bf64e",
+    "sha256:a2738b08d7114c9d5581dd5482d3b5cc297fcf73b8d330c3ba38d24c43939119",
+    "sha256:47a53288c3ef0ee51df84ef47d217f18c1762412532fded9af1fd88ecee14294",
+    "sha256:9e707aa6db4786355904a1b794c80f378b690f8f0384af56117708a23a91f1da",
+    "sha256:a3446cc6c821fa11b704a45811ab554675f0327307af71b3f4ff5a70c7a4eec8",
+    "sha256:42608b42cb5e68548abf1c71aa851acfd65816d0ceaff6ee85849c7c478463f0",
+    "sha256:53c769b49ca0a2f0f6cf5e4a807af8933cec6cde9302d56d91a78bc38ea407a8",
+    "sha256:f76f397f2ce6b266573b70eb60ef1335e9984a1941eedd2a3505af4870c3afa0",
+)
+CONTAINER_ENV_SHA256 = "2aa77e5524a862a6e823e4399b76801e1a6891b71ac564fa25c3bcb7cf0bd9ad"
+CONTAINER_LABELS_SHA256 = "37e2b0645fe73117143c9c818877d23fc27feac1d181e29593a4a9308a655c47"
+# Reviewed broadcast/link-local constants, an upstream config example, and a
+# nginx JS property, only in immutable public base layers. Deny inputs still win.
+PUBLIC_BASE_NETWORK_METADATA_SHA256 = {
+    "f45462bf3cd12ea2b347f32f6c4d0a0d36e01694de332b307af90d42951c5bd6",
+    "da51cf1afeda313d3202229979d5e0f29437e72637ecc26b4203fe4224ae797c",
+    "c5eb5a4cc76a5cdb16e79864b9ccd26c3553f0c396d0a21bafb7be71c1efcd8c",
+    "9b7842af4ef67bdf99fb8d1e53fe8896efdf89849875dcfa055c50910ac6c581",
+}
+CONTAINER_INSTALLERS = ("OpenReader-Native-v1.2.0.apk", "OpenReader-Native-source.zip", VOICE_NAME)
 APPROVED_SOURCE_BINARIES = {
     "android_app/android/gradle/wrapper/gradle-wrapper.jar":
         "16caeaf66d57a0d1d2087fef6a97efa62de8da69afa5b908f40db35afc4342da",
@@ -176,6 +203,13 @@ SECRET_PATTERNS = [
     re.compile(r"(?:https?|wss?)://[^/\s:@]+:[^/\s@]+@", re.I),
     re.compile(r"\bAuthorization\s*[:=]\s*[\"']?(?:Bearer|Basic)\s+[A-Za-z0-9+/_.=-]{12,}", re.I),
 ]
+RAW_SECRET_PATTERNS = [re.compile(pattern.pattern.encode("ascii"), pattern.flags & ~re.UNICODE) for pattern in SECRET_PATTERNS]
+RAW_IP_PATTERNS = [re.compile(pattern.pattern.encode("ascii"), pattern.flags & ~re.UNICODE) for pattern in (IPV4, IPV6)]
+RAW_PRIVATE_HOST = re.compile(PRIVATE_HOST.pattern.encode("ascii"), re.I)
+RAW_WIDE_TEXT = (
+    re.compile(rb"(?:[\x20-\x7e]\x00){6,}"),
+    re.compile(rb"(?:\x00[\x20-\x7e]){6,}"),
+)
 ASSIGNMENT = re.compile(
     r"""(?im)(?:^|[{"'\s,])(?P<key>[A-Z_]*?(?:PASSWORD|PASSWD|SECRET|API_KEY|"""
     r"""ACCESS_TOKEN|AUTH_TOKEN|PRIVATE_KEY|CLIENT_SECRET|SIGNING_KEY|STORE_PASSWORD|"""
@@ -276,6 +310,10 @@ class Scanner:
         self.checked: set[str] = set()
         self.deny = deny or []
         self.deny_text = [value.decode("utf-8", errors="ignore") for value in self.deny]
+        self.deny_wide = [
+            value.encode(encoding) for value in self.deny_text if value
+            for encoding in ("utf-16-le", "utf-16-be")
+        ]
 
     def fail(self, label: str, reason: str) -> None:
         # Do not echo filenames: even a forbidden document name can be personal.
@@ -283,7 +321,8 @@ class Scanner:
         self.errors.add((identifier, reason))
 
     def text(self, data: bytes, label: str, code: bool = False, fixture_hosts: set[str] | None = None,
-             critical_only: bool = False, metadata_kind: str | None = None) -> None:
+             critical_only: bool = False, metadata_kind: str | None = None,
+             public_base: bool = False) -> None:
         if any(value in data for value in self.deny):
             self.fail(label, "local private-value denylist")
         # Android resources and DEX may contain UTF-16 as well as UTF-8 strings.
@@ -294,15 +333,20 @@ class Scanner:
             tokens = list(CODE_TOKEN.finditer(text)) if code else []
             if any(value and value in text for value in self.deny_text):
                 self.fail(label, "local private-value denylist")
-            if any(pattern.search(text) for pattern in SECRET_PATTERNS):
+            # Pinned public OS crypto parsers contain PEM header constants, not
+            # owner signing keys. Every other strong pattern and deny literal runs.
+            if any(pattern.search(text) for pattern in SECRET_PATTERNS[1 if public_base else 0:]):
                 self.fail(label, "secret/credential pattern")
             for pattern in (IPV4, IPV6):
                 for match in pattern.finditer(text):
                     if not allowed_ip(match.group(0)):
+                        if public_base and hashlib.sha256(match[0].encode()).hexdigest() in PUBLIC_BASE_NETWORK_METADATA_SHA256:
+                            continue
                         self.fail(label, "non-example private IP")
             if critical_only:
-                if PRIVATE_HOST.search(text):
-                    self.fail(label, "private network hostname in raw artifact")
+                for match in PRIVATE_HOST.finditer(text):
+                    if not public_base or hashlib.sha256(match[0].encode()).hexdigest() not in PUBLIC_BASE_NETWORK_METADATA_SHA256:
+                        self.fail(label, "private network hostname in raw artifact")
                 continue
             for match in ASSIGNMENT.finditer(text):
                 value = match.group("quoted") if match.group("quoted") is not None else match.group("plain")
@@ -321,6 +365,8 @@ class Scanner:
                         continue
                 if not placeholder(value):
                     self.fail(label, "literal credential assignment")
+            if metadata_kind == "public_base_history":
+                continue
             for match in EMAIL.finditer(text):
                 if not example_host(match.group(1)):
                     if metadata_kind == "dart" and hashlib.sha256(
@@ -624,8 +670,11 @@ class Scanner:
         if path.is_symlink() or any(parent.is_symlink() for parent in path.parents) or not path.is_file():
             self.fail(str(path), "artifact is not a regular file")
             return
+        if path.name == CONTAINER_NAME:
+            self.container(path)
+            return
         if path.suffix.lower() not in {".apk", ".zip"}:
-            self.fail(str(path), "only APK and ZIP release assets are supported")
+            self.fail(str(path), "only APK/ZIP and the pinned Docker-save archive are supported")
             return
         pinned = path.name == VOICE_NAME
         if pinned:
@@ -639,6 +688,190 @@ class Scanner:
                 self.archive(archive, path.name, path.suffix.lower() == ".apk", pinned)
         except (OSError, ValueError, zipfile.BadZipFile, RuntimeError, NotImplementedError):
             self.fail(path.name, "unreadable/encrypted archive")
+
+    def container(self, path: Path) -> None:
+        with path.open("rb") as stream:
+            if hashlib.file_digest(stream, "sha256").hexdigest() != CONTAINER_SHA256:
+                self.fail(path.name, "Docker-save archive SHA256 mismatch")
+                return
+
+        def safe_name(name):
+            value = PurePosixPath(name)
+            if value.is_absolute() or ".." in value.parts or "\\" in name or not value.parts:
+                raise ValueError("unsafe Docker archive path")
+            return value.as_posix()
+
+        def canonical_hash(value):
+            return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+        scanner = self
+
+        def raw_security(data, public):
+            if any(value in data for value in scanner.deny + scanner.deny_wide):
+                scanner.fail(path.name, "local private-value denylist")
+            if any(pattern.search(data) for pattern in RAW_SECRET_PATTERNS[1 if public else 0:]):
+                scanner.fail(path.name, "secret/credential pattern")
+            for match in RAW_PRIVATE_HOST.finditer(data):
+                if not public or hashlib.sha256(match[0]).hexdigest() not in PUBLIC_BASE_NETWORK_METADATA_SHA256:
+                    scanner.fail(path.name, "private network hostname in raw artifact")
+            for pattern in RAW_IP_PATTERNS:
+                for match in pattern.finditer(data):
+                    if not allowed_ip(match[0].decode("ascii")):
+                        if public and hashlib.sha256(match[0]).hexdigest() in PUBLIC_BASE_NETWORK_METADATA_SHA256:
+                            continue
+                        scanner.fail(path.name, "non-example private IP")
+            for pattern, encoding in zip(RAW_WIDE_TEXT, ("utf-16-le", "utf-16-be")):
+                for match in pattern.finditer(data):
+                    scanner.text(match[0].decode(encoding).encode(), path.name, critical_only=True, public_base=public)
+
+        class LayerReader:
+            def __init__(self, stream, public):
+                self.stream, self.public = stream, public
+                self.sha, self.buffer, self.tail = hashlib.sha256(), bytearray(), b""
+                self.count = 0
+
+            def check(self, data):
+                raw_security(self.tail + data, self.public)
+                overlap = max([512] + [2 * len(value) + 2 for value in scanner.deny])
+                self.tail = (self.tail + data)[-overlap:]
+
+            def read(self, size=-1):
+                data = self.stream.read(size)
+                self.count += len(data)
+                if self.count > MAX_ARCHIVE:
+                    raise ValueError("oversized Docker layer")
+                self.sha.update(data)
+                self.buffer.extend(data)
+                if len(self.buffer) >= 1024 * 1024 or not data:
+                    self.check(bytes(self.buffer))
+                    self.buffer.clear()
+                return data
+
+        try:
+            with tarfile.open(path, "r:gz") as outer:
+                members = outer.getmembers()
+                if len(members) > MAX_MEMBERS or sum(m.size for m in members) > MAX_ARCHIVE:
+                    raise ValueError("oversized Docker archive")
+                files = {}
+                for member in members:
+                    name = safe_name(member.name)
+                    if PurePosixPath(name).suffix.lower() in {".pdf", ".epub", ".docx", ".wav"}:
+                        raise ValueError("forbidden document in Docker archive")
+                    if member.isdir():
+                        continue
+                    if not member.isfile() or name in files:
+                        raise ValueError("duplicate/link Docker archive entry")
+                    files[name] = member
+
+                def read_file(name, limit=MAX_FILE):
+                    member = files[safe_name(name)]
+                    if member.size > limit:
+                        raise ValueError("oversized Docker metadata")
+                    return outer.extractfile(member).read()
+
+                manifest = json.loads(read_file("manifest.json"))
+                if len(manifest) != 1 or manifest[0].get("RepoTags") != [CONTAINER_TAG]:
+                    raise ValueError("unexpected Docker image/tag")
+                image = manifest[0]
+                config = json.loads(read_file(image["Config"]))
+                layers = image["Layers"]
+                referenced = set(layers) | {
+                    image["Config"], "manifest.json", "index.json", "oci-layout", "repositories",
+                }
+                if any(
+                    not re.fullmatch(r"blobs/sha256/[0-9a-f]{64}", name)
+                    for name in set(files) - referenced
+                ):
+                    raise ValueError("unexpected Docker metadata file")
+                diff_ids = config["rootfs"]["diff_ids"]
+                prefix = len(CONTAINER_BASE_DIFF_IDS)
+                if (
+                    len(layers) != len(diff_ids) or len(set(layers)) != len(layers)
+                    or tuple(diff_ids[:prefix]) != CONTAINER_BASE_DIFF_IDS
+                    or config.get("os") != "linux" or config.get("architecture") != "amd64"
+                ):
+                    raise ValueError("unapproved Docker base/platform")
+                settings = config["config"]
+                if (
+                    canonical_hash(settings.get("Env")) != CONTAINER_ENV_SHA256
+                    or canonical_hash(settings.get("Labels")) != CONTAINER_LABELS_SHA256
+                    or settings.get("Entrypoint") != ["nginx"]
+                    or settings.get("Cmd") != ["-g", "daemon off;"]
+                ):
+                    raise ValueError("unapproved Docker environment/configuration")
+                for history in config.get("history", []):
+                    self.text(
+                        history.get("created_by", "").encode(), path.name,
+                        metadata_kind="public_base_history",
+                    )
+                # Docker-save's OCI descriptors/configs are read, never extracted.
+                for name in set(files) - set(layers):
+                    data = read_file(name, 1024 * 1024)
+                    json.loads(data)
+                    self.text(data, path.name, critical_only=True)
+
+                web = "usr/share/nginx/html/"
+                allowed = {web + name for name in (*CONTAINER_INSTALLERS, "SHA256SUMS", "index.html")}
+                allowed.add("etc/nginx/conf.d/default.conf")
+                directories = {str(parent) for name in allowed for parent in PurePosixPath(name).parents}
+                seen, payload_hashes, checksum_data = set(), {}, b""
+                for index, name in enumerate(layers):
+                    source = outer.extractfile(files[safe_name(name)])
+                    signature = source.read(2)
+                    source.seek(0)
+                    decompressed = gzip.GzipFile(fileobj=source) if signature == b"\x1f\x8b" else source
+                    reader = LayerReader(decompressed, index < prefix)
+                    with tarfile.open(fileobj=reader, mode="r|") as layer:
+                        count = 0
+                        for member in layer:
+                            count += 1
+                            if count > MAX_MEMBERS:
+                                raise ValueError("too many layer files")
+                            member_name = safe_name(member.name)
+                            if PurePosixPath(member_name).suffix.lower() in {".pdf", ".epub", ".docx", ".wav"}:
+                                self.fail(path.name, "forbidden document/audio in Docker layer")
+                            if index < prefix:
+                                continue  # Exact public base bytes are checked below.
+                            if member.isdir():
+                                if member_name not in directories:
+                                    raise ValueError("unexpected added Docker directory")
+                                continue
+                            if not member.isfile() or member_name not in allowed or member_name in seen:
+                                raise ValueError("unexpected/duplicate added Docker file")
+                            if member.size > MAX_ARCHIVE:
+                                raise ValueError("oversized Docker payload")
+                            seen.add(member_name)
+                            data = layer.extractfile(member).read()
+                            basename = PurePosixPath(member_name).name
+                            if basename in CONTAINER_INSTALLERS:
+                                payload_hashes[basename] = hashlib.sha256(data).hexdigest()
+                                pinned = basename == VOICE_NAME
+                                if pinned and payload_hashes[basename] != VOICE_SHA256:
+                                    self.fail(path.name, "container voice pack SHA256 mismatch")
+                                else:
+                                    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                                        self.archive(archive, path.name + "!" + basename, basename.endswith(".apk"), pinned)
+                            elif basename == "SHA256SUMS":
+                                checksum_data = data
+                            else:
+                                self.text(data, path.name)
+                    while reader.read(1024 * 1024):
+                        pass
+                    if "sha256:" + reader.sha.hexdigest() != diff_ids[index]:
+                        raise ValueError("Docker layer digest mismatch")
+                if seen != allowed:
+                    raise ValueError("missing Docker installer files")
+                expected = {}
+                for line in checksum_data.decode("ascii").splitlines():
+                    match = re.fullmatch(r"([0-9a-f]{64})  ([A-Za-z0-9._-]+)", line)
+                    if not match or match[2] in expected:
+                        raise ValueError("invalid internal installer manifest")
+                    expected[match[2]] = match[1]
+                if expected != payload_hashes:
+                    raise ValueError("internal installer manifest mismatch")
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, IndexError,
+                tarfile.TarError, zipfile.BadZipFile, EOFError):
+            self.fail(path.name, "invalid/unapproved Docker-save structure or payload")
 
     def archive(self, archive: zipfile.ZipFile, label: str, apk: bool, pinned: bool) -> None:
         members = archive.infolist()
@@ -689,7 +922,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path("."))
     parser.add_argument("--history", action="store_true", help="also scan all locally reachable commits")
-    parser.add_argument("--artifact", type=Path, action="append", default=[], help="scan release APK/ZIP (repeatable); replaces tree scan")
+    parser.add_argument("--artifact", type=Path, action="append", default=[], help="scan APK/ZIP or the pinned Docker-save archive (repeatable); replaces tree scan")
     parser.add_argument("--deny-stdin", action="store_true", help="additional private literals, newline-delimited on stdin; never echoed")
     args = parser.parse_args(argv)
     scanner = Scanner([s for s in sys.stdin.buffer.read().splitlines() if s] if args.deny_stdin else [])
