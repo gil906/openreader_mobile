@@ -1,7 +1,7 @@
 name: openreader-downloads
 services:
   downloads:
-    image: ghcr.io/gil906/openreader_mobile:v1.2.0
+    image: ghcr.io/gil906/openreader_mobile:v1.3.0
     pull_policy: never
     restart: unless-stopped
     ports:

@@ -9,10 +9,17 @@ import 'offline_engine.dart';
 import 'offline_store.dart';
 
 class NarrationProgress {
-  const NarrationProgress(this.total, this.durations, this.sizes);
+  NarrationProgress(
+    this.total,
+    this.durations,
+    this.sizes, [
+    List<bool>? nonSpeech,
+  ]) : nonSpeech = nonSpeech ?? List.filled(total, false);
   final int total;
   final List<int> durations;
   final List<int> sizes;
+  final List<bool> nonSpeech;
+  int get separators => nonSpeech.where((value) => value).length;
   int get completed => durations.where((value) => value > 0).length;
   bool get complete => total > 0 && completed == total;
   int get bytes => sizes.fold(0, (a, b) => a + b);
@@ -76,7 +83,21 @@ class SavedNarration {
       return list.map((value) => integer(value)).toList();
     }
 
-    return NarrationProgress(plan.length, values('durations'), values('sizes'));
+    final separators = json['nonSpeech'];
+    if (separators != null &&
+        (separators is! List || separators.length != plan.length)) {
+      throw const ReaderException(
+        'Saved narration marker metadata is incomplete.',
+      );
+    }
+    return NarrationProgress(
+      plan.length,
+      values('durations'),
+      values('sizes'),
+      separators is List
+          ? separators.map((value) => value == true).toList()
+          : null,
+    );
   }
 
   Future<OfflineSpeech?> load(int ordinal) async {
@@ -130,11 +151,13 @@ class SavedNarration {
       }
       status.durations[ordinal] = speech.durationMs;
       status.sizes[ordinal] = await _wave(ordinal).length();
+      status.nonSpeech[ordinal] = speech.alignment['nonSpeech'] == true;
       await _writeJson(File(p.join(directory.path, 'progress.json')), {
         'voice': voice,
         'model': offlinePackHash,
         'durations': status.durations,
         'sizes': status.sizes,
+        'nonSpeech': status.nonSpeech,
       });
       onProgress(status);
     }

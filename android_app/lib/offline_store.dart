@@ -26,6 +26,16 @@ class OfflineDocument {
   String get origin => metadata['origin'] as String;
   String get key => p.basename(directory.path);
   bool get importedOnPhone => !payload.containsKey('playback');
+  Future<void> saveServerDocument(String origin, Json serverDocument) async {
+    metadata['narrationServerDocument'] = {
+      'origin': origin,
+      'document': serverDocument,
+    };
+    final file = File(p.join(directory.path, 'document.json'));
+    final partial = File('${file.path}.part');
+    await partial.writeAsString(jsonEncode(metadata), flush: true);
+    await partial.rename(file.path);
+  }
 }
 
 class OfflineStore {
@@ -197,6 +207,12 @@ class OfflineStore {
     }
     final narration = Directory(p.join(root.path, 'prepared', document.key));
     if (await narration.exists()) await narration.delete(recursive: true);
+    final serverNarration = Directory(
+      p.join(root.path, 'prepared_server', document.key),
+    );
+    if (await serverNarration.exists()) {
+      await serverNarration.delete(recursive: true);
+    }
     await document.directory.delete(recursive: true);
   }
 

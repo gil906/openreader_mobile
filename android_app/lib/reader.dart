@@ -55,6 +55,7 @@ class _ReaderPageState extends State<ReaderPage> {
   bool? _transcript;
   bool _awake = false;
   bool _positionRestored = false;
+  bool _viewerLaidOut = false;
   bool _fullscreen = false;
   bool _pdfDark = false;
   bool _changingFullscreen = false;
@@ -166,6 +167,7 @@ class _ReaderPageState extends State<ReaderPage> {
       },
       onViewerReady: (document, controller) {
         if (!mounted) return;
+        _viewerLaidOut = true;
         setState(() => _pageCount = document.pages.length);
         _restorePage();
       },
@@ -240,7 +242,12 @@ class _ReaderPageState extends State<ReaderPage> {
   }
 
   void _restorePage() {
-    if (_positionRestored || !_viewer.isReady || !_playback.connected) return;
+    if (_positionRestored ||
+        !_viewerLaidOut ||
+        !_viewer.isReady ||
+        !_playback.connected) {
+      return;
+    }
     _positionRestored = true;
     final target = _playback.plan
         .where(
@@ -338,7 +345,12 @@ class _ReaderPageState extends State<ReaderPage> {
   }
 
   Future<void> _goTo(int page) async {
-    if (!_viewer.isReady || page < 1 || page > _viewer.pageCount) return;
+    if (!_viewerLaidOut ||
+        !_viewer.isReady ||
+        page < 1 ||
+        page > _viewer.pageCount) {
+      return;
+    }
     await _viewer.goToPage(pageNumber: page);
     if (mounted) await _loadText(page);
   }
@@ -406,6 +418,16 @@ class _ReaderPageState extends State<ReaderPage> {
     if (_savingOffline || _pdfBytes == null || _playback.payload == null) {
       return;
     }
+    if (prepareAudio && _savedDocument != null) {
+      await _playback.pause();
+      if (!mounted) return;
+      await showPrepareAudio(
+        context,
+        _savedDocument!,
+        widget.preferences.getString('offlineVoice') ?? 'am_michael',
+      );
+      return;
+    }
     setState(() => _savingOffline = true);
     try {
       final store = await OfflineStore.open();
@@ -452,8 +474,14 @@ class _ReaderPageState extends State<ReaderPage> {
     }
   }
 
-  Future<void> _switchSource(bool phone) async {
-    if (_switchingSource || phone == _playback.isOffline) return;
+  Future<void> _switchSource(String source) async {
+    final currentSource = _playback.usesSavedServer
+        ? 'saved-server'
+        : _playback.isOffline
+        ? 'phone'
+        : 'server';
+    if (_switchingSource || source == currentSource) return;
+    final phone = source != 'server';
     setState(() => _switchingSource = true);
     final previous = _playback;
     final wasPlaying = previous.wantedPlaying;
@@ -530,6 +558,7 @@ class _ReaderPageState extends State<ReaderPage> {
         document['id'] as String,
         widget.preferences,
         offline: saved,
+        savedServerAudio: source == 'saved-server',
       );
       await target.prepare();
       if (target.error != null) throw ReaderException(target.error!);
@@ -545,6 +574,15 @@ class _ReaderPageState extends State<ReaderPage> {
                 .firstOrNull?['ordinal'],
           );
       await target.selectAt(ordinal);
+      if (saved != null &&
+          !await widget.preferences.setString(
+            'offline-source:${saved.key}',
+            source == 'saved-server' ? 'server' : 'phone',
+          )) {
+        throw const ReaderException(
+          'Could not save your audio source preference.',
+        );
+      }
       previous.removeListener(_onPlayback);
       setState(() {
         _playback = target!;
@@ -570,19 +608,24 @@ class _ReaderPageState extends State<ReaderPage> {
     }
   }
 
-  Widget _sourceButton() => PopupMenuButton<bool>(
+  Widget _sourceButton() => PopupMenuButton<String>(
     key: const Key('voice-source'),
-    tooltip: 'Choose phone or server voice',
+    tooltip: 'Choose phone, saved server, or live server audio',
     enabled: !_switchingSource,
     onSelected: _switchSource,
     itemBuilder: (_) => [
       CheckedPopupMenuItem(
-        value: true,
-        checked: _playback.isOffline,
+        value: 'phone',
+        checked: _playback.isOffline && !_playback.usesSavedServer,
         child: const Text('Phone / offline'),
       ),
       CheckedPopupMenuItem(
-        value: false,
+        value: 'saved-server',
+        checked: _playback.usesSavedServer,
+        child: const Text('Saved server / offline'),
+      ),
+      CheckedPopupMenuItem(
+        value: 'server',
         checked: !_playback.isOffline,
         child: const Text('Server'),
       ),
@@ -1076,7 +1119,7 @@ class _ReaderPageState extends State<ReaderPage> {
               children: [
                 _sourceButton(),
                 Expanded(
-                  child: _playback.isOffline
+                  child: _playback.isOffline && !_playback.usesSavedServer
                       ? PopupMenuButton<String>(
                           tooltip: 'Choose offline voice',
                           initialValue: _playback.offlineVoice,

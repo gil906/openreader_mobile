@@ -2,10 +2,13 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
+import 'api.dart';
 import 'offline_engine.dart';
 import 'offline_narration.dart';
 import 'offline_store.dart';
+import 'server_narration.dart';
 
 Future<void> showPrepareAudio(
   BuildContext context,
@@ -30,6 +33,107 @@ class _PrepareAudioDialogState extends State<_PrepareAudioDialog> {
   bool _cancel = false;
   String? _error;
   NarrationProgress? _progress;
+  String _generator = 'phone';
+  String? _serverStatus;
+  double? _serverProgress;
+  bool _serverComplete = false;
+
+  Future<void> _prepareServer() async {
+    final preferences = await SharedPreferences.getInstance();
+    final configured = preferences.getString('server');
+    if (configured == null || configured.isEmpty) {
+      throw const ReaderException('Sign into your OpenReader server first.');
+    }
+    final api = OpenReaderApi(OpenReaderApi.parseServer(configured));
+    try {
+      if (!await api.restore()) {
+        throw const ReaderException('Sign into your OpenReader server again.');
+      }
+      var document = widget.document.document;
+      if (widget.document.importedOnPhone) {
+        if (!mounted) return;
+        final approved = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Upload a copy to your server?'),
+            content: const Text(
+              'Server generation needs a copy of this PDF on your configured OpenReader server. Your phone copy stays saved.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Upload copy'),
+              ),
+            ],
+          ),
+        );
+        if (approved != true) return;
+        final link = widget.document.metadata['narrationServerDocument'];
+        if (link is Map && link['origin'] == api.base.origin) {
+          document = object(link['document']);
+        } else {
+          document = await api.uploadPdf(
+            await widget.document.pdf.readAsBytes(),
+            '${document['name']}',
+          );
+          await widget.document.saveServerDocument(api.base.origin, document);
+        }
+      } else if (widget.document.origin != api.base.origin) {
+        throw const ReaderException(
+          'Connect to the server this PDF was saved from, or import a local copy.',
+        );
+      }
+      final deadline = DateTime.now().add(const Duration(minutes: 8));
+      Json? payload;
+      while (!_cancel && mounted) {
+        final response = await api.post(
+          '/api/documents/${Uri.encodeComponent(document['id'] as String)}/reader-bootstrap',
+        );
+        if (response['status'] == 'ready') {
+          payload = object(response['payload']);
+          break;
+        }
+        if (response['status'] == 'error' || DateTime.now().isAfter(deadline)) {
+          throw const ReaderException(
+            'Server PDF preparation failed or timed out. Resume later.',
+          );
+        }
+        setState(() => _serverStatus = 'Server is preparing the PDF...');
+        await Future<void>.delayed(const Duration(seconds: 2));
+      }
+      if (payload == null || _cancel || !mounted) return;
+      final complete = await ServerNarration(widget.document).prepare(
+        api,
+        payload,
+        canceled: () => _cancel || !mounted,
+        onProgress: (message, progress) {
+          if (mounted) {
+            setState(() {
+              _serverStatus = message;
+              _serverProgress = progress;
+            });
+          }
+        },
+      );
+      if (complete) {
+        if (!await preferences.setString(
+          'offline-source:${widget.document.key}',
+          'server',
+        )) {
+          throw const ReaderException(
+            'Audio saved, but the playback source preference could not be saved.',
+          );
+        }
+        if (mounted) setState(() => _serverComplete = true);
+      }
+    } finally {
+      api.close();
+    }
+  }
 
   Future<void> _prepare() async {
     setState(() {
@@ -42,6 +146,10 @@ class _PrepareAudioDialogState extends State<_PrepareAudioDialog> {
     );
     try {
       await WakelockPlus.enable();
+      if (_generator == 'server') {
+        await _prepareServer();
+        return;
+      }
       final narration = SavedNarration(widget.document, widget.voice);
       final progress = await narration.prepare(
         (text) => engine.synthesize(text, widget.voice),
@@ -50,6 +158,17 @@ class _PrepareAudioDialogState extends State<_PrepareAudioDialog> {
           if (mounted) setState(() => _progress = progress);
         },
       );
+      if (progress.complete) {
+        final preferences = await SharedPreferences.getInstance();
+        if (!await preferences.setString(
+          'offline-source:${widget.document.key}',
+          'phone',
+        )) {
+          throw const ReaderException(
+            'Audio saved, but the playback source preference could not be saved.',
+          );
+        }
+      }
       if (mounted) setState(() => _progress = progress);
     } catch (error) {
       if (mounted) setState(() => _error = 'Audio preparation failed: $error');
@@ -82,14 +201,49 @@ class _PrepareAudioDialogState extends State<_PrepareAudioDialog> {
           children: [
             Text('${widget.document.document['name']}'),
             const SizedBox(height: 8),
-            Text('Voice: ${offlineVoices[widget.voice]}'),
-            const SizedBox(height: 12),
-            const Text(
-              'Generate and permanently save all narration on this phone before reading. '
-              'Audio uses roughly 3 MB per minute and is kept until you remove it. '
-              'Keep this screen open; stopped or interrupted work can resume.',
+            DropdownButtonFormField<String>(
+              initialValue: _generator,
+              decoration: const InputDecoration(
+                labelText: 'Generate audio using',
+              ),
+              items: const [
+                DropdownMenuItem(
+                  value: 'phone',
+                  child: Text('Phone / offline voice'),
+                ),
+                DropdownMenuItem(
+                  value: 'server',
+                  child: Text('Server / save on phone'),
+                ),
+              ],
+              onChanged: _running
+                  ? null
+                  : (value) => setState(() {
+                      _generator = value!;
+                      _error = null;
+                    }),
             ),
-            if (_progress != null) ...[
+            const SizedBox(height: 8),
+            Text(
+              _generator == 'phone'
+                  ? 'Voice: ${offlineVoices[widget.voice]}'
+                  : 'Voice: your current server voice and blend',
+            ),
+            const SizedBox(height: 12),
+            Text(
+              _generator == 'phone'
+                  ? 'Generate and permanently save all narration on this phone before reading. '
+                        'Audio uses roughly 3 MB per minute and is kept until you remove it. '
+                        'Keep this screen open; stopped or interrupted work can resume.'
+                  : 'Generate on your server, then download the complete MP3 and PDF word timings '
+                        'to this phone. Playback needs no server, internet, or voice pack. '
+                        'Stopping here pauses the download; server generation can continue. Resume later to finish.',
+            ),
+            if (_generator == 'server' && _serverStatus != null) ...[
+              const SizedBox(height: 12),
+              Text(_serverStatus!, key: const Key('server-audio-progress')),
+            ],
+            if (_generator == 'phone' && _progress != null) ...[
               const SizedBox(height: 12),
               Text(
                 _progress!.complete
@@ -98,16 +252,26 @@ class _PrepareAudioDialogState extends State<_PrepareAudioDialog> {
                           '${(_progress!.bytes / 1048576).toStringAsFixed(1)} MB',
                 key: const Key('prepare-audio-progress'),
               ),
+              if (_progress!.separators > 0)
+                Text(
+                  '${_progress!.separators} non-spoken formatting markers saved as short pauses.',
+                ),
             ],
             if (_running) ...[
               const SizedBox(height: 12),
               LinearProgressIndicator(
-                value: _progress == null
+                value: _generator == 'server'
+                    ? _serverProgress
+                    : _progress == null
                     ? null
                     : _progress!.completed / _progress!.total,
               ),
               if (_cancel)
-                const Text('Stopping after the current passage is saved...'),
+                Text(
+                  _generator == 'server'
+                      ? 'Pausing this phone; server generation can continue.'
+                      : 'Stopping after the current passage is saved...',
+                ),
             ],
             if (_error != null)
               Text(
@@ -128,7 +292,10 @@ class _PrepareAudioDialogState extends State<_PrepareAudioDialog> {
             onPressed: () => Navigator.pop(context),
             child: const Text('Close'),
           ),
-        if (!_running && _progress?.complete != true)
+        if (!_running &&
+            (_generator == 'server'
+                ? !_serverComplete
+                : _progress?.complete != true))
           FilledButton(
             key: const Key('start-prepare-audio'),
             onPressed: _prepare,

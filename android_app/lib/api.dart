@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -95,6 +96,143 @@ class OpenReaderApi {
 
   Future<Json> get(String path) => _json('GET', path);
   Future<Json> post(String path, [Json? body]) => _json('POST', path, body);
+
+  Future<bool> downloadAudio(
+    String url,
+    File destination, {
+    required bool Function() canceled,
+    required void Function(int received, int? total) onProgress,
+  }) async {
+    var uri = base.resolve(url);
+    if (uri.origin != base.origin) {
+      throw const ReaderException('Audio downloads must start at your server.');
+    }
+    final partial = File('${destination.path}.part');
+    final validator = File('${destination.path}.etag');
+    final etag = await validator.exists() ? await validator.readAsString() : '';
+    var offset = await partial.exists() && etag.startsWith('"')
+        ? await partial.length()
+        : 0;
+    for (var redirects = 0; redirects < 5; redirects++) {
+      if (canceled()) return false;
+      final request = http.Request('GET', uri)..followRedirects = false;
+      request.headers['Accept-Encoding'] = 'identity';
+      if (uri.origin == base.origin) request.headers['Cookie'] = _cookie;
+      if (offset > 0) {
+        request.headers['Range'] = 'bytes=$offset-';
+        request.headers['If-Range'] = etag;
+      }
+      final response = await _transport
+          .send(request)
+          .timeout(const Duration(seconds: 60));
+      if ([301, 302, 303, 307, 308].contains(response.statusCode)) {
+        await response.stream.drain<void>();
+        final location = response.headers['location'];
+        if (location == null) {
+          throw const ReaderException('Missing audio redirect.');
+        }
+        final next = uri.resolve(location);
+        if (!['http', 'https'].contains(next.scheme) ||
+            next.userInfo.isNotEmpty ||
+            uri.scheme == 'https' && next.scheme != 'https') {
+          throw const ReaderException('Unsafe audio download redirect.');
+        }
+        uri = next;
+        continue;
+      }
+      if (response.statusCode == 416 && offset > 0) {
+        await response.stream.drain<void>();
+        offset = 0;
+        continue;
+      }
+      if (response.statusCode != 200 && response.statusCode != 206) {
+        _check(await http.Response.fromStream(response));
+        throw const ReaderException('Unexpected audio download response.');
+      }
+      int? total;
+      if (response.statusCode == 206) {
+        final range = RegExp(r'^bytes ([0-9]+)-([0-9]+)/([0-9]+)$')
+            .firstMatch(response.headers['content-range'] ?? '');
+        if (offset == 0 ||
+            range == null ||
+            int.parse(range[1]!) != offset ||
+            response.headers['etag'] != etag ||
+            int.parse(range[2]!) + 1 != int.parse(range[3]!)) {
+          await response.stream.drain<void>();
+          throw const ReaderException(
+            'Invalid resumed audio download. Retry preparation.',
+          );
+        }
+        total = int.parse(range[3]!);
+      } else {
+        offset = 0;
+        total = response.contentLength;
+      }
+      final type = response.headers['content-type'] ?? '';
+      if (type.contains('text/') || type.contains('json')) {
+        await response.stream.drain<void>();
+        throw const ReaderException(
+          'The server did not return an audio recording.',
+        );
+      }
+      final nextEtag = response.headers['etag'] ?? '';
+      if (offset == 0) {
+        await validator.writeAsString('', flush: true);
+        await partial.writeAsBytes([], flush: true);
+      }
+      await validator.writeAsString(
+        nextEtag.startsWith('"') ? nextEtag : '',
+        flush: true,
+      );
+      final output = partial.openWrite(
+        mode: offset > 0 ? FileMode.append : FileMode.write,
+      );
+      var received = offset;
+      var flushed = received;
+      try {
+        await for (final bytes in response.stream.timeout(
+          const Duration(seconds: 60),
+        )) {
+          if (canceled()) return false;
+          received += bytes.length;
+          if (received > 8 * 1024 * 1024 * 1024 ||
+              total != null && received > total) {
+            throw const ReaderException(
+              'Audio exceeds the expected download size.',
+            );
+          }
+          output.add(bytes);
+          if (received - flushed >= 4 * 1024 * 1024) {
+            await output.flush();
+            flushed = received;
+          }
+          onProgress(received, total);
+        }
+        await output.flush();
+      } finally {
+        await output.close();
+      }
+      if (received == 0 || total != null && received != total) {
+        throw const ReaderException(
+          'The audio download was interrupted. Resume preparation.',
+        );
+      }
+      final signature = await partial.openRead(0, 3).first;
+      if (signature.length < 3 ||
+          !(signature[0] == 73 && signature[1] == 68 && signature[2] == 51 ||
+              signature[0] == 255 && signature[1] & 224 == 224)) {
+        await partial.delete();
+        await validator.delete();
+        throw const ReaderException(
+          'The downloaded file is not an MP3 recording.',
+        );
+      }
+      await partial.rename(destination.path);
+      if (await validator.exists()) await validator.delete();
+      return true;
+    }
+    throw const ReaderException('Too many audio download redirects.');
+  }
 
   Future<Json> _json(String method, String path, [Json? body]) async {
     final uri = base.resolve(path);

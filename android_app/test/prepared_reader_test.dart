@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui';
@@ -15,6 +16,69 @@ import 'package:openreader_native/playback.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
+  test(
+    'legacy nine-passage checkpoints resume at a numeric passage unchanged',
+    () async {
+      final root = await Directory.systemTemp.createTemp('prepared-number-');
+      addTearDown(() => root.delete(recursive: true));
+      final store = OfflineStore(root);
+      final doc = await store.save(
+        origin: 'https://reader.example.com',
+        account: 'owner',
+        document: {'id': 'numbers', 'name': 'Numbers.pdf'},
+        payload: {
+          'plan': {
+            'segments': [
+              for (var i = 0; i < 11; i++)
+                {
+                  'ordinal': i,
+                  'text': i == 9
+                      ? '123'
+                      : i == 10
+                      ? '12'
+                      : 'Synthetic passage $i',
+                  'locator': {'page': 1, 'blockId': 'block-$i'},
+                },
+            ],
+          },
+        },
+        bytes: Uint8List.fromList(utf8.encode('%PDF-1.7\nsynthetic')),
+      );
+      final source = await File('${root.path}/sample.wav')
+          .writeAsBytes(Uint8List(144));
+      var stopped = false;
+      final book = SavedNarration(doc, 'am_michael');
+      await book.prepare(
+        (text) async => OfflineSpeech(
+          source.path,
+          1000,
+          approximateOfflineAlignment(text, 1000),
+        ),
+        canceled: () => stopped,
+        onProgress: (p) => stopped = p.completed == 9,
+      );
+      final checkpoint = File('${book.directory.path}/progress.json');
+      final legacy = object(jsonDecode(await checkpoint.readAsString()))
+        ..remove('nonSpeech');
+      await checkpoint.writeAsString(jsonEncode(legacy));
+      final generated = <String>[];
+      final complete = await SavedNarration(doc, 'am_michael').prepare(
+        (text) async {
+          generated.add(text);
+          return OfflineSpeech(
+            source.path,
+            1000,
+            approximateOfflineAlignment(text, 1000),
+          );
+        },
+        canceled: () => false,
+        onProgress: (_) {},
+      );
+      expect(complete.complete, isTrue);
+      expect(generated, ['123', '12']);
+      expect(complete.separators, 0);
+    },
+  );
   test('full PDF narration resumes, survives cache eviction, and is voice-specific', () async {
     final root = await Directory.systemTemp.createTemp('prepared-book-');
     addTearDown(() => root.delete(recursive: true));

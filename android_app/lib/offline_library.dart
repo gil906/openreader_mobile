@@ -13,6 +13,7 @@ import 'offline_store.dart';
 import 'reader.dart';
 import 'offline_narration.dart';
 import 'prepare_audio_dialog.dart';
+import 'server_narration.dart';
 
 class OfflineLibraryPage extends StatefulWidget {
   const OfflineLibraryPage({super.key, required this.preferences});
@@ -25,6 +26,7 @@ class _OfflineLibraryPageState extends State<OfflineLibraryPage> {
   OfflineStore? _store;
   List<OfflineDocument> _documents = [];
   Map<String, NarrationProgress> _narrations = {};
+  Set<String> _serverRecordings = {};
   bool _installed = false;
   bool _busy = true;
   bool _downloading = false;
@@ -57,17 +59,22 @@ class _OfflineLibraryPageState extends State<OfflineLibraryPage> {
       final documents = await _store!.documents();
       final installed = await _store!.packInstalled;
       final narrations = <String, NarrationProgress>{};
+      final serverRecordings = <String>{};
       for (final document in documents) {
         narrations[document.key] = await SavedNarration(
           document,
           _voice,
         ).progress();
+        if (await ServerNarration(document).load() != null) {
+          serverRecordings.add(document.key);
+        }
       }
       if (mounted) {
         setState(() {
           _documents = documents;
           _installed = installed;
           _narrations = narrations;
+          _serverRecordings = serverRecordings;
         });
       }
     } catch (error) {
@@ -320,6 +327,15 @@ class _OfflineLibraryPageState extends State<OfflineLibraryPage> {
         p.join(_store!.root.path, 'prepared', document.key),
       );
       if (await directory.exists()) await directory.delete(recursive: true);
+      final serverDirectory = ServerNarration(document).directory;
+      if (await serverDirectory.exists()) {
+        await serverDirectory.delete(recursive: true);
+      }
+      if (!await widget.preferences.remove('offline-source:${document.key}')) {
+        throw const ReaderException(
+          'Audio removed, but the source preference could not be cleared.',
+        );
+      }
       await _refresh();
     } catch (error) {
       _status('Could not remove saved narration: $error', error: true);
@@ -449,7 +465,9 @@ class _OfflineLibraryPageState extends State<OfflineLibraryPage> {
                   overflow: TextOverflow.ellipsis,
                 ),
                 subtitle: Text(
-                  _narrations[document.key]?.complete == true
+                  _serverRecordings.contains(document.key)
+                      ? 'PDF + server voice saved / ready offline'
+                      : _narrations[document.key]?.complete == true
                       ? 'PDF + all ${offlineVoices[_voice]?.split(' / ').first} audio saved'
                       : '${_narrations[document.key]?.completed ?? 0}/${_narrations[document.key]?.total ?? 0} audio passages saved',
                 ),

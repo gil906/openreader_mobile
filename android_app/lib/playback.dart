@@ -10,6 +10,7 @@ import 'api.dart';
 import 'offline_engine.dart';
 import 'offline_store.dart';
 import 'offline_narration.dart';
+import 'server_narration.dart';
 
 class ReaderPlayback extends ChangeNotifier {
   ReaderPlayback(
@@ -18,11 +19,19 @@ class ReaderPlayback extends ChangeNotifier {
     this.preferences, {
     AudioPlayer? audioPlayer,
     this.offline,
+    bool? savedServerAudio,
   }) : player = audioPlayer ?? AudioPlayer() {
+    _useSavedServer =
+        offline != null &&
+        (savedServerAudio ??
+            preferences.getString('offline-source:${offline!.key}') ==
+                'server');
     _offlineVoice = preferences.getString('offlineVoice') ?? 'am_michael';
     speed =
         preferences.getDouble(
-          isOffline ? 'offlinePlaybackSpeed' : 'serverPlaybackSpeed',
+          isOffline && !_useSavedServer
+              ? 'offlinePlaybackSpeed'
+              : 'serverPlaybackSpeed',
         ) ??
         preferences.getDouble('playbackSpeed') ??
         1;
@@ -79,6 +88,9 @@ class ReaderPlayback extends ChangeNotifier {
   final AudioPlayer player;
   final OfflineDocument? offline;
   OfflineVoiceEngine? _offlineEngine;
+  late final bool _useSavedServer;
+  ServerRecording? _serverRecording;
+  bool get usesSavedServer => _useSavedServer;
   late String _offlineVoice;
   bool _localLoaded = false;
   final List<int> _offlineQueue = [];
@@ -109,9 +121,13 @@ class ReaderPlayback extends ChangeNotifier {
 
   bool get isOffline => offline != null;
   String get _readingStatus => isOffline
-      ? '${_savedNarrationComplete ? 'Saved narration' : 'Phone voice'} / approximate word timing'
+      ? usesSavedServer
+            ? 'Saved server audio${_serverRecording!.estimated ? ' / approximate word timing' : ''}'
+            : '${_savedNarrationComplete ? 'Saved narration' : 'Phone voice'} / approximate word timing'
       : 'Reading aloud';
-  String get voice => isOffline
+  String get voice => usesSavedServer
+      ? _serverRecording?.voice ?? 'Saved server voice'
+      : isOffline
       ? offlineVoices[_offlineVoice] ?? _offlineVoice
       : object(object(payload?['playback'])['request'])['settings'] is Map
       ? object(
@@ -125,15 +141,34 @@ class ReaderPlayback extends ChangeNotifier {
       timeline.where((segment) => segment['generated'] == true).length;
   bool get connected => payload != null;
   String get offlineVoice => _offlineVoice;
-  String get _progressKey =>
-      '${isOffline ? 'offline-progress' : 'progress'}:${api.base.origin}:$documentId';
-  String get _resumeKey =>
-      '${isOffline ? 'offline-resume' : 'resume'}:${api.base.origin}:$documentId';
+  String get _progressKey => usesSavedServer
+      ? 'saved-server-progress:${offline!.key}'
+      : '${isOffline ? 'offline-progress' : 'progress'}:${api.base.origin}:$documentId';
+  String get _resumeKey => usesSavedServer
+      ? 'saved-server-resume:${offline!.key}'
+      : '${isOffline ? 'offline-resume' : 'resume'}:${api.base.origin}:$documentId';
 
   Future<void> prepare() async {
     final epoch = ++_epoch;
     try {
       if (offline != null) {
+        if (usesSavedServer) {
+          _serverRecording = await ServerNarration(offline!).load();
+          if (_serverRecording == null) {
+            throw const ReaderException(
+              'Prepare server audio for this PDF first, or choose Phone / offline.',
+            );
+          }
+          payload = _serverRecording!.payload;
+          timeline = _serverRecording!.timeline;
+          currentOrdinal = preferences.getInt(_progressKey) ?? 0;
+          if (!plan.any((row) => row['ordinal'] == currentOrdinal)) {
+            currentOrdinal = 0;
+          }
+          status = 'Saved server audio ready / no network needed';
+          notifyListeners();
+          return;
+        }
         final source = offline!.payload;
         final segments = buildOfflinePlan(source);
         if (segments.isEmpty) {
@@ -289,7 +324,9 @@ class ReaderPlayback extends ChangeNotifier {
     _lastSaved = -1;
     status = play
         ? (isOffline
-              ? 'Generating natural speech on this phone...'
+              ? usesSavedServer
+                    ? 'Opening saved server audio...'
+                    : 'Generating natural speech on this phone...'
               : 'Preparing audio on your server...')
         : 'Passage selected / tap Listen';
     notifyListeners();
@@ -415,6 +452,28 @@ class ReaderPlayback extends ChangeNotifier {
     int ordinal, {
     required bool resume,
   }) async {
+    if (usesSavedServer) {
+      _offlineQueue.clear();
+      final row = timeline
+          .where((row) => integer(row['ordinal']) == ordinal)
+          .first;
+      final offset = resume ? preferences.getInt(_resumeKey) ?? 0 : 0;
+      final position =
+          integer(row['startMs']) +
+          (offset >= 0 && offset < integer(row['durationMs']) ? offset : 0);
+      await player.setFilePath(
+        _serverRecording!.audio.path,
+        initialPosition: Duration(milliseconds: position),
+      );
+      if (_closed || epoch != _epoch) return;
+      await player.setSpeed(speed);
+      _localLoaded = true;
+      preparing = false;
+      status = _readingStatus;
+      notifyListeners();
+      _play();
+      return;
+    }
     if (_queueFill != null) await _queueFill;
     if (_closed || epoch != _epoch) return;
     _narration = SavedNarration(offline!, _offlineVoice);
@@ -542,7 +601,7 @@ class ReaderPlayback extends ChangeNotifier {
   }
 
   Future<void> setOfflineVoice(String value) async {
-    if (!isOffline || !offlineVoices.containsKey(value)) {
+    if (!isOffline || usesSavedServer || !offlineVoices.containsKey(value)) {
       _fail(const ReaderException('This offline voice is unavailable.'));
       return;
     }
@@ -647,8 +706,10 @@ class ReaderPlayback extends ChangeNotifier {
     final origin = timeline
         .where((row) => integer(row['ordinal']) == _fromOrdinal)
         .firstOrNull;
-    currentMs = integer(origin?['startMs']) + player.position.inMilliseconds;
-    final current = isOffline
+    currentMs =
+        (usesSavedServer ? 0 : integer(origin?['startMs'])) +
+        player.position.inMilliseconds;
+    final current = isOffline && !usesSavedServer
         ? origin
         : timeline
               .where(
@@ -684,7 +745,9 @@ class ReaderPlayback extends ChangeNotifier {
       await player.setSpeed(value);
       speed = value;
       await preferences.setDouble(
-        isOffline ? 'offlinePlaybackSpeed' : 'serverPlaybackSpeed',
+        isOffline && !usesSavedServer
+            ? 'offlinePlaybackSpeed'
+            : 'serverPlaybackSpeed',
         value,
       );
       if (!_closed) notifyListeners();

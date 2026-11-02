@@ -16,12 +16,10 @@
   <a href="#privacy-is-a-release-requirement">Privacy</a>
 </p>
 
-> **v1.2.0 release candidate.** Native app source and actual synthetic-document
-> screenshots are included, and Android functional validation has completed.
-> Final release APK, matching source archive, checksums and container assets
-> still require packaging and artifact verification. Release/container links
-> are publication targets, not a claim that they already exist.
-> Complete the [release checklist](docs/RELEASING.md) before publication.
+> **v1.3.0:** fixes phone narration stopping on number-only passages and adds
+> server-generated narration downloads for genuinely offline playback.
+> Install the signed APK from [Releases](https://github.com/gil906/openreader_mobile/releases/tag/v1.3.0).
+> Existing phone narration checkpoints and the installed voice pack are preserved.
 
 ## What this app is
 
@@ -29,17 +27,20 @@ OpenReader Native is an **unofficial, independent Android client** for reading
 PDFs with synchronized speech. It is not a web view, an official upstream
 OpenReader release, or a promise of full web-client parity.
 
-The app has two deliberately separate speech paths:
+The app has three deliberately separate speech paths:
 
 - **On-device:** saved/imported PDF + downloaded English model + speech and audio
   preparation on your Android device. No server is needed once these are saved.
 - **Your server:** sign in to a self-hosted OpenReader installation and use its
   library and configured speech provider. Network connectivity is required.
+- **Saved server audio:** generate with your server's current voice/blend, then
+  download its complete MP3 and PDF timing data. Once saved, playback needs
+  neither the server, internet access, nor the phone voice pack.
 
 EPUB, DOCX, and other web-only workflows are **future work**, not native features.
 The optional upstream web application has a different feature set.
 
-## The v1.2.0 experience
+## The v1.3.0 experience
 
 The native update has been validated on Android test builds:
 
@@ -47,14 +48,16 @@ The native update has been validated on Android test builds:
 |---|---|
 | Documents | Import a PDF from Android storage, save a server PDF for offline use, and receive PDF **Open with / Share** intents |
 | Speech | 20 English Kokoro voices with the downloadable full-quality voice pack |
-| Preparation | Prepare an entire PDF's audio, cancel, resume, and preserve progress/audio separately per voice |
+| Preparation | Choose phone or server generation; prepare an entire PDF, stop/resume, and permanently retain narration on the phone |
 | Playback | Continuous preloaded/queued playback, paragraph-tap navigation, and separate speed preferences for each speech source |
-| Read-along | Highlighting scoped to the current source; approximate offline word timing versus server-provided exact word timing when available online |
+| Read-along | PDF word highlighting; phone timing is approximate; saved server timing retains exact server words when available and explicitly estimates missing alignments |
 | Reading surface | Native fullscreen, dark PDF pages, adaptive phone/foldable layouts, and a **Fit page** control with size-aware fitting |
-| Source choice | Explicit offline/server switching; a local PDF is uploaded to your server only after consent |
+| Source choice | Phone / offline, Saved server / offline, or live Server; local PDF upload requires consent |
 
-**Important limits:** preparation runs on the phone and can take time, battery,
-and storage. Keep the preparation screen open. There is **no foreground
+**Important limits:** phone generation can take time, battery, and storage.
+Keep the preparation screen open. Server generation runs on your server;
+stopping on the phone does not stop a shared server job. Return and resume to
+download the completed recording. There is **no foreground
 background-service guarantee**; Android may interrupt work when the app is
 backgrounded or the process is killed. Resume is the recovery path, not a claim
 of uninterrupted background processing. Approximate offline highlighting is
@@ -63,13 +66,35 @@ prepared audio, document text quality, and device performance.
 
 ### Validation before release packaging
 
-The native validation pass includes **18 unit tests** and repeated end-to-end
+The native validation pass includes focused unit regressions and end-to-end
 checks of full-book prepare/stop/resume, PDF-word glyph semantics, consented
 server upload, source switching, and independently stored speed preferences.
 Prepared continuous playback also passed with the model/transient cache removed
 and Android in actual airplane mode. This proves playback of retained prepared
 audio without synthesis/network access, not generation of new speech without
 the model. New text or another voice still needs the offline pack.
+
+The v1.3.0 native regression additionally synthesizes numeric-only and technical
+passages with the actual Kokoro model, then generates and downloads server
+narration. Its saved MP3 crosses passages, seeks, and highlights PDF glyphs in
+actual airplane mode with the model and transient audio removed.
+
+### Choose where narration is generated
+
+1. Save a server PDF for offline use, or import a PDF in **Offline library**.
+2. Open its menu → **Prepare entire PDF audio**.
+3. Under **Generate audio using**, choose **Phone / offline voice** or
+   **Server / save on phone**. Server preparation uses your configured server
+   voice/blend; select that voice in the upstream web settings first.
+4. Keep this screen open until audio is saved. Interrupted preparation resumes
+   cached work; MP3 downloads resume when the server supplies a strong validator.
+5. In the PDF's audio-source menu, choose **Phone / offline**,
+   **Saved server / offline**, or **Server** for live streaming.
+
+Phone generation speaks numeric passages rather than discarding them. Formatting
+separators become counted short pauses; readable synthesis failures remain
+explicit. Server exports containing skipped passages are retried once and never
+selected as a complete recording if passages are still missing.
 
 Cold- and warm-start Android PDF content-URI handoffs passed independently.
 The app's explicit PDF intent handler owns **VIEW / SEND** flows; Flutter's
@@ -94,11 +119,11 @@ See the [screenshot provenance requirements](docs/screenshots/README.md).
 
 ### Android APK
 
-1. Open the public [v1.2.0 release](https://github.com/gil906/openreader_mobile/releases/tag/v1.2.0).
-2. Download `OpenReader-Native-v1.2.0.apk` and `SHA256SUMS`.
+1. Open the public [v1.3.0 release](https://github.com/gil906/openreader_mobile/releases/tag/v1.3.0).
+2. Download `OpenReader-Native-v1.3.0.apk` and `SHA256SUMS`.
 3. Check its checksum against the release manifest. For example, on a desktop:
    ```sh
-   sha256sum OpenReader-Native-v1.2.0.apk
+   sha256sum OpenReader-Native-v1.3.0.apk
    ```
 4. Transfer/open the APK on Android and allow installation from that source if
    Android prompts. Turn that permission off again when finished.
@@ -125,7 +150,7 @@ on port **3005**. The download container is not the document server.
 | Size | Approximately 324 MiB |
 | Quality | Full-quality model, not an app-side quantized substitute |
 | SHA-256 | `abaff9787f8b73c28dc2876c7610bcc162b0fc29cd6fa7556af72e20b8f9e8d7` |
-| Public source | [v1.2.0 voice pack](https://github.com/gil906/openreader_mobile/releases/download/v1.2.0/kokoro-english-v1.zip) |
+| Public source | [v1.3.0 voice pack](https://github.com/gil906/openreader_mobile/releases/download/v1.3.0/kokoro-english-v1.zip) |
 
 Download and install the pack through the app's offline voice setup. Keep the
 network connection available during the initial download. Verify the pinned
@@ -190,7 +215,7 @@ The supplied Compose file uses upstream images unchanged:
 |---|---|---|
 | `openreader` | `ghcr.io/richardr1126/openreader:v5.4.1`; includes its own embedded compute worker | Loopback `3003` app and `8081` worker |
 | `kokoro` | `ghcr.io/remsky/kokoro-fastapi-cpu:v0.2.4`; OpenAI-compatible speech provider | Internal `8880` only |
-| `downloads` | Locally loaded `ghcr.io/gil906/openreader_mobile:v1.2.0`; public static installer assets | `3005` → container `80`; optional profile |
+| `downloads` | Locally loaded `ghcr.io/gil906/openreader_mobile:v1.3.0`; public static installer assets | `3005` → container `80`; optional profile |
 
 **Kokoro FastAPI is not OpenReader's compute worker.** The app's embedded worker
 handles processing and signed audio playback; Kokoro is the internal speech
@@ -267,20 +292,20 @@ voice pack + matching source + checksums + download page**. It does not contain
 the Flutter build toolchain, server application, accounts, documents, model
 caches outside the pinned release pack, or credentials.
 
-Image tag: `ghcr.io/gil906/openreader_mobile:v1.2.0`. This is also the tag restored
+Image tag: `ghcr.io/gil906/openreader_mobile:v1.3.0`. This is also the tag restored
 by `docker load`; **it does not imply public GHCR availability**.
 
 ### Recommended: download the public release image and load it
 
-The required container delivery path for v1.2.0 is the public release asset
-**`openreader_mobile-container-v1.2.0.tar.gz`**, exported with `docker save`.
+The required container delivery path for v1.3.0 is the public release asset
+**`openreader_mobile-container-v1.3.0.tar.gz`**, exported with `docker save`.
 It does not require GHCR access, a registry login, or an account token.
 
 1. Obtain [`compose.downloads.yaml`](compose.downloads.yaml) from the public
    repository checkout. The release's app-only source ZIP does not contain
    the deployment files.
-2. From the [v1.2.0 release](https://github.com/gil906/openreader_mobile/releases/tag/v1.2.0),
-   download `openreader_mobile-container-v1.2.0.tar.gz` and
+2. From the [v1.3.0 release](https://github.com/gil906/openreader_mobile/releases/tag/v1.3.0),
+   download `openreader_mobile-container-v1.3.0.tar.gz` and
    `SHA256SUMS`. The published archive is **linux/amd64**; it does not
    automatically select an architecture. Native ARM hosts should rebuild from
    the public installer assets with the pinned multi-platform Dockerfile on
@@ -290,7 +315,7 @@ It does not require GHCR access, a registry login, or an account token.
 ```sh
 grep -E '^[0-9a-fA-F]{64} [ *]openreader_mobile-container-v1\.2\.0\.tar\.gz$' SHA256SUMS |
   sha256sum --strict --check -
-gzip -dc openreader_mobile-container-v1.2.0.tar.gz | docker load
+gzip -dc openreader_mobile-container-v1.3.0.tar.gz | docker load
 docker compose -f compose.downloads.yaml up -d --pull never --no-build
 ```
 
@@ -335,7 +360,7 @@ needed for the exact APK, not a private development checkout.
 
 ```sh
 python3 tools/prepare-downloads.py --from-dir ./dist-input
-docker build -t ghcr.io/gil906/openreader_mobile:v1.2.0 .
+docker build -t ghcr.io/gil906/openreader_mobile:v1.3.0 .
 docker compose -f compose.downloads.yaml up -d --pull never --no-build
 ```
 
@@ -345,17 +370,17 @@ output after failure. The Docker context uses a positive allowlist, and the
 Dockerfile copies only the five expected public files. No signing material is
 passed into the image, and no document/data mount is attached to it.
 
-### Alternative: rebuild from exactly the v1.2.0 public installer assets
+### Alternative: rebuild from exactly the v1.3.0 public installer assets
 
 ```sh
 python3 tools/prepare-downloads.py
 # For independently trusted APK/source checksums, also supply:
 # python3 tools/prepare-downloads.py --checksums ./trusted-SHA256SUMS
-docker build -t ghcr.io/gil906/openreader_mobile:v1.2.0 .
+docker build -t ghcr.io/gil906/openreader_mobile:v1.3.0 .
 ```
 
 This downloads only the three named assets and checksum manifest from the fixed
-public v1.2.0 release, verifies all hashes, and performs local artifact checks.
+public v1.3.0 release, verifies all hashes, and performs local artifact checks.
 The voice pack has a separately pinned hash. A manifest downloaded from the same
 release establishes transfer integrity, **not independent publisher authenticity**.
 Verify APK signing identity and retain an independently trusted manifest for
@@ -380,7 +405,7 @@ or the image to work around that.
 Only if maintainers have explicitly verified anonymous access may users choose:
 
 ```sh
-docker pull ghcr.io/gil906/openreader_mobile:v1.2.0
+docker pull ghcr.io/gil906/openreader_mobile:v1.3.0
 docker compose -f compose.downloads.yaml up -d --pull never --no-build
 ```
 
@@ -392,7 +417,7 @@ The artifact scanner supports this one audited, SHA-256-pinned **linux/amd64**
 Docker-save archive; it does not blanket-allow tar files:
 
 ```sh
-python3 tools/check_public_release.py --artifact openreader_mobile-container-v1.2.0.tar.gz
+python3 tools/check_public_release.py --artifact openreader_mobile-container-v1.3.0.tar.gz
 ```
 
 It reads Docker/OCI metadata and layers without extraction, verifies the pinned
@@ -469,7 +494,7 @@ python3 tools/check_public_release.py --root .
 python3 tools/check_public_release.py --root . --history
 # Assets live outside git:
 python3 tools/check_public_release.py \
-  --artifact dist/OpenReader-Native-v1.2.0.apk \
+  --artifact dist/OpenReader-Native-v1.3.0.apk \
   --artifact dist/OpenReader-Native-source.zip \
   --artifact dist/kokoro-english-v1.zip
 ```

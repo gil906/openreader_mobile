@@ -99,10 +99,10 @@ without logging them, and review final assets rather than an older candidate.
 The Docker-save artifact checker accepts only:
 
 ```text
-openreader_mobile-container-v1.2.0.tar.gz
-SHA-256: 637e974cc29c50ab4c859b11c33447928fe8ab9fbbaf6384dcd53d06118ae231
+openreader_mobile-container-v1.3.0.tar.gz
+SHA-256: a8e456420ea1bd9307e3496a4be9fa35c061766bc9f3f8b278cf7bbb82bde85f
 Platform: linux/amd64
-Tag: ghcr.io/gil906/openreader_mobile:v1.2.0
+Tag: ghcr.io/gil906/openreader_mobile:v1.3.0
 ```
 
 This exact archive was built from the curated installer dist, HTTP/range tested,

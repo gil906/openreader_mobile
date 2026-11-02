@@ -1,4 +1,4 @@
-# Manual release gate — v1.2.0
+# Manual release gate — v1.3.0
 
 This checklist does not authorize or perform publication. There are deliberately
 no Actions workflows. Do not push/create tags, releases, or packages until the
@@ -45,13 +45,13 @@ maintainer has completed every applicable gate.
 
 Expected release assets:
 
-1. `OpenReader-Native-v1.2.0.apk`
+1. `OpenReader-Native-v1.3.0.apk`
 2. `OpenReader-Native-source.zip` — exact corresponding source plus notices and
    build instructions, using `android_app/` as the native source directory
 3. `kokoro-english-v1.zip` — SHA-256
    `abaff9787f8b73c28dc2876c7610bcc162b0fc29cd6fa7556af72e20b8f9e8d7`
-4. `openreader_mobile-container-v1.2.0.tar.gz` — reviewed `docker save` image,
-   retaining tag `ghcr.io/gil906/openreader_mobile:v1.2.0`
+4. `openreader_mobile-container-v1.3.0.tar.gz` — reviewed `docker save` image,
+   retaining tag `ghcr.io/gil906/openreader_mobile:v1.3.0`
 5. `SHA256SUMS` — exactly the four asset names above, SHA-256 followed by two spaces
 
 The internal installer `dist/SHA256SUMS` remains three-entry (APK/source/voice).
@@ -89,7 +89,7 @@ personal company names. Do not change the hash merely to bypass a finding.
       optional upstream server and embedded-worker audio routes. Kokoro remains
       internal-only; the worker's public URL must actually reach the phone.
 - [ ] Export the reviewed tagged image as
-      `openreader_mobile-container-v1.2.0.tar.gz` and append its checksum only
+      `openreader_mobile-container-v1.3.0.tar.gz` and append its checksum only
       to the external four-entry release `SHA256SUMS` as the primary public
       container delivery. Do not modify the image's three-entry manifest.
       Record its platform, inspect image history and all added layers, and
@@ -100,7 +100,7 @@ personal company names. Do not change the hash merely to bypass a finding.
 - [ ] Test checksum verification, `docker load`, and
       `docker compose -f compose.downloads.yaml up -d --pull never --no-build`
       without GHCR credentials, a server `.env`, or registry access. Confirm the
-      loaded tag is `ghcr.io/gil906/openreader_mobile:v1.2.0`.
+      loaded tag is `ghcr.io/gil906/openreader_mobile:v1.3.0`.
 - [ ] Confirm the archive's **linux/amd64** platform is clearly documented, and
       that native ARM users are directed to build the pinned multi-platform
       Dockerfile locally from the approved public installer assets.

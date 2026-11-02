@@ -2,7 +2,7 @@
 """Prepare curated public installer assets; never publishes or builds an APK.
 
 Use --from-dir for locally curated artifacts before publication. Without it,
-download only the fixed public v1.2.0 release and verify its SHA256SUMS.
+download only the fixed public v1.3.0 release and verify its SHA256SUMS.
 """
 from __future__ import annotations
 
@@ -17,14 +17,14 @@ import urllib.request
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "v1.2.0"
+VERSION = "v1.3.0"
 BASE = "https://github.com/gil906/openreader_mobile/releases/download/" + VERSION
 ASSETS = (
-    "OpenReader-Native-v1.2.0.apk",
+    "OpenReader-Native-v1.3.0.apk",
     "OpenReader-Native-source.zip",
     "kokoro-english-v1.zip",
 )
-CONTAINER_ASSET = "openreader_mobile-container-v1.2.0.tar.gz"
+CONTAINER_ASSET = "openreader_mobile-container-v1.3.0.tar.gz"
 
 
 def digest(path: Path) -> str:
@@ -33,7 +33,7 @@ def digest(path: Path) -> str:
 
 
 def fetch(name: str, destination: Path) -> None:
-    request = urllib.request.Request(BASE + "/" + name, headers={"User-Agent": "OpenReader-public-asset-preparer/1.2.0"})
+    request = urllib.request.Request(BASE + "/" + name, headers={"User-Agent": "OpenReader-public-asset-preparer/1.3.0"})
     with urllib.request.urlopen(request, timeout=90) as response:
         # GitHub release downloads redirect to the public asset CDN.
         if not response.url.startswith("https://"):

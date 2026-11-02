@@ -11,6 +11,7 @@ import 'package:sherpa_onnx/sherpa_onnx.dart' as sherpa;
 
 import 'api.dart';
 import 'offline_store.dart';
+import 'offline_speech.dart';
 
 const offlineVoices = <String, String>{
   'am_michael': 'Michael / American male',
@@ -264,7 +265,7 @@ void _voiceWorker(Json options) {
         final text = request['text'] as String;
         final voice = request['voice'] as String;
         final hash = sha256
-            .convert(utf8.encode('$offlinePackHash\n$voice\n$text'))
+            .convert(utf8.encode('$offlinePackHash\nspeech-v2\n$voice\n$text'))
             .toString();
         final wav = p.join(cache, '$hash.wav');
         final metadata = File(p.join(cache, '$hash.json'));
@@ -275,20 +276,51 @@ void _voiceWorker(Json options) {
             'path': wav,
           };
         } else {
-          final audio = tts!.generate(text: text, sid: _speakers[voice]!);
-          if (audio.sampleRate <= 0 || audio.samples.isEmpty) {
+          final input = phoneSpeechInput(text);
+          final sampleRate = tts!.sampleRate;
+          final buffers = <Float32List>[];
+          if (input.separator) {
+            buffers.add(Float32List((sampleRate * .15).round()));
+          } else {
+            for (final part in offlineChunks(input.text, limit: 240)) {
+              var audio = tts.generate(text: part, sid: _speakers[voice]!);
+              if (audio.samples.isEmpty &&
+                  RegExp(r'^[A-Za-z]{1,24}$').hasMatch(part)) {
+                audio = tts.generate(
+                  text: part.split('').join(' '),
+                  sid: _speakers[voice]!,
+                );
+              }
+              if (audio.sampleRate != sampleRate || audio.samples.isEmpty) {
+                throw const ReaderException(
+                  'The phone voice could not pronounce this passage. Try server generation; already saved passages are kept.',
+                );
+              }
+              buffers.add(audio.samples);
+            }
+          }
+          final samples = Float32List(
+            buffers.fold<int>(0, (count, part) => count + part.length),
+          );
+          var offset = 0;
+          for (final buffer in buffers) {
+            samples.setRange(offset, offset + buffer.length, buffer);
+            offset += buffer.length;
+          }
+          if (samples.isEmpty || sampleRate <= 0) {
             throw const ReaderException(
-              'Kokoro generated no audio for this passage.',
+              'The phone voice returned an empty recording.',
             );
           }
-          _writeWave('$wav.part', audio.samples, audio.sampleRate);
+          _writeWave('$wav.part', samples, sampleRate);
           File('$wav.part').renameSync(wav);
-          final duration = (audio.samples.length * 1000 / audio.sampleRate)
-              .round();
+          final duration = (samples.length * 1000 / sampleRate).round();
           result = {
             'path': wav,
             'durationMs': duration,
-            'alignment': approximateOfflineAlignment(text, duration),
+            'alignment': input.separator
+                ? {'estimated': true, 'nonSpeech': true, 'words': <Json>[]}
+                : approximateOfflineAlignment(text, duration),
           };
           File('${metadata.path}.part')
               .writeAsStringSync(jsonEncode(result), flush: true);
