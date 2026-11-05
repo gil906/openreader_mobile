@@ -35,27 +35,77 @@ class OpenReaderApp extends StatelessWidget {
   const OpenReaderApp({super.key});
   @override
   Widget build(BuildContext context) => MaterialApp(
-    title: 'OpenReader Native',
+    title: 'OpenReader',
     navigatorKey: _navigator,
     debugShowCheckedModeBanner: false,
     theme: ThemeData(
       colorScheme: ColorScheme.fromSeed(
-        seedColor: const Color(0xff126b64),
+        seedColor: const Color(0xffc86446),
         brightness: Brightness.light,
+        surface: const Color(0xfffaf7f2),
       ),
+      scaffoldBackgroundColor: const Color(0xfffaf7f2),
       useMaterial3: true,
-      inputDecorationTheme: const InputDecorationTheme(
-        border: OutlineInputBorder(),
+      appBarTheme: const AppBarTheme(
+        backgroundColor: Color(0xfffaf7f2),
+        foregroundColor: Color(0xff1c1917),
+        elevation: 0,
+        scrolledUnderElevation: 0,
+      ),
+      cardTheme: CardThemeData(
+        color: const Color(0xffffffff),
+        elevation: 0,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+          side: const BorderSide(color: Color(0xffe7e2da)),
+        ),
+      ),
+      inputDecorationTheme: InputDecorationTheme(
+        filled: true,
+        fillColor: const Color(0xfff3efe8),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: Color(0xffe0d9ce)),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: Color(0xffe0d9ce)),
+        ),
       ),
     ),
     darkTheme: ThemeData(
       colorScheme: ColorScheme.fromSeed(
-        seedColor: const Color(0xff69c8ba),
+        seedColor: const Color(0xffd97757),
         brightness: Brightness.dark,
+        surface: const Color(0xff181614),
       ),
+      scaffoldBackgroundColor: const Color(0xff141210),
       useMaterial3: true,
-      inputDecorationTheme: const InputDecorationTheme(
-        border: OutlineInputBorder(),
+      appBarTheme: const AppBarTheme(
+        backgroundColor: Color(0xff181614),
+        foregroundColor: Color(0xfff5f1eb),
+        elevation: 0,
+        scrolledUnderElevation: 0,
+      ),
+      cardTheme: CardThemeData(
+        color: const Color(0xff1f1c19),
+        elevation: 0,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+          side: const BorderSide(color: Color(0xff2e2a25)),
+        ),
+      ),
+      inputDecorationTheme: InputDecorationTheme(
+        filled: true,
+        fillColor: const Color(0xff1f1c19),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: Color(0xff332e29)),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: Color(0xff332e29)),
+        ),
       ),
     ),
     home: const ConnectPage(),
@@ -183,21 +233,39 @@ class _ConnectPageState extends State<ConnectPage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Icon(
-                    Icons.auto_stories_rounded,
-                    size: 72,
-                    color: Theme.of(context).colorScheme.primary,
+                  Center(
+                    child: Container(
+                      width: 68,
+                      height: 68,
+                      decoration: BoxDecoration(
+                        color: Theme.of(
+                          context,
+                        ).colorScheme.primary.withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(20),
+                      ),
+                      child: Icon(
+                        Icons.menu_book_rounded,
+                        size: 36,
+                        color: Theme.of(context).colorScheme.primary,
+                      ),
+                    ),
                   ),
                   const SizedBox(height: 20),
                   Text(
-                    'Your reading room',
-                    style: Theme.of(context).textTheme.headlineMedium,
+                    'OpenReader',
+                    style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: -0.5,
+                    ),
                     textAlign: TextAlign.center,
                   ),
-                  const SizedBox(height: 8),
-                  const Text(
-                    'Native PDFs. Natural voices. Follow every word.',
+                  const SizedBox(height: 6),
+                  Text(
+                    'Quiet, distraction-free PDF reading & natural narration.',
                     textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
                   ),
                   const SizedBox(height: 32),
                   TextField(
@@ -221,7 +289,7 @@ class _ConnectPageState extends State<ConnectPage> {
                     autocorrect: false,
                     decoration: const InputDecoration(
                       labelText: 'Email',
-                      prefixIcon: Icon(Icons.person_outline),
+                      prefixIcon: Icon(Icons.mail_outline_rounded),
                     ),
                   ),
                   const SizedBox(height: 16),
@@ -234,11 +302,13 @@ class _ConnectPageState extends State<ConnectPage> {
                     onSubmitted: (_) => _busy ? null : _connect(),
                     decoration: InputDecoration(
                       labelText: 'Password',
-                      prefixIcon: const Icon(Icons.lock_outline),
+                      prefixIcon: const Icon(Icons.lock_outline_rounded),
                       suffixIcon: IconButton(
                         tooltip: _obscure ? 'Show password' : 'Hide password',
                         icon: Icon(
-                          _obscure ? Icons.visibility : Icons.visibility_off,
+                          _obscure
+                              ? Icons.visibility_outlined
+                              : Icons.visibility_off_outlined,
                         ),
                         onPressed: () => setState(() => _obscure = !_obscure),
                       ),
@@ -264,21 +334,20 @@ class _ConnectPageState extends State<ConnectPage> {
                             height: 18,
                             child: CircularProgressIndicator(strokeWidth: 2),
                           )
-                        : const Icon(Icons.login),
-                    label: Text(_busy ? 'Connecting...' : 'Connect to library'),
+                        : const Icon(Icons.arrow_forward_rounded),
+                    label: Text(_busy ? 'Connecting...' : 'Open library'),
                   ),
                   const SizedBox(height: 12),
                   OutlinedButton.icon(
                     key: const Key('open-offline-library'),
                     onPressed: _openOffline,
-                    icon: const Icon(Icons.offline_pin_outlined),
+                    icon: const Icon(Icons.bookmarks_outlined),
                     label: const Text('Offline library & voices'),
                   ),
                   const SizedBox(height: 18),
                   Text(
                     'Server reading uses home Wi-Fi or VPN. Offline library uses '
-                    'voices and PDFs saved on this phone. HTTP is for '
-                    'trusted home networks only. Use HTTPS for remote access.',
+                    'voices and PDFs saved on this phone.',
                     style: Theme.of(context).textTheme.bodySmall,
                     textAlign: TextAlign.center,
                   ),
@@ -370,7 +439,10 @@ class _LibraryPageState extends State<LibraryPage> {
         .toList();
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Your library'),
+        title: const Text(
+          'Library',
+          style: TextStyle(fontWeight: FontWeight.w700, letterSpacing: -0.3),
+        ),
         automaticallyImplyLeading: false,
         actions: [
           IconButton(
@@ -382,17 +454,17 @@ class _LibraryPageState extends State<LibraryPage> {
                     OfflineLibraryPage(preferences: widget.preferences),
               ),
             ),
-            icon: const Icon(Icons.offline_pin_outlined),
+            icon: const Icon(Icons.bookmarks_outlined),
           ),
           IconButton(
             tooltip: 'Refresh library',
             onPressed: _busy ? null : _refresh,
-            icon: const Icon(Icons.refresh),
+            icon: const Icon(Icons.refresh_rounded),
           ),
           IconButton(
             tooltip: 'Sign out',
             onPressed: _busy ? null : _signOut,
-            icon: const Icon(Icons.logout),
+            icon: const Icon(Icons.logout_rounded),
           ),
         ],
       ),
@@ -404,8 +476,8 @@ class _LibraryPageState extends State<LibraryPage> {
             child: TextField(
               onChanged: (value) => setState(() => _query = value),
               decoration: const InputDecoration(
-                hintText: 'Find a PDF',
-                prefixIcon: Icon(Icons.search),
+                hintText: 'Filter books & documents...',
+                prefixIcon: Icon(Icons.search_rounded),
               ),
             ),
           ),
@@ -414,15 +486,16 @@ class _LibraryPageState extends State<LibraryPage> {
             child: Row(
               children: [
                 Icon(
-                  Icons.home_outlined,
-                  size: 18,
+                  Icons.library_books_outlined,
+                  size: 17,
                   color: Theme.of(context).colorScheme.primary,
                 ),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    '${widget.api.base.host}  /  ${documents.length} PDFs',
+                    '${widget.api.base.host}  •  ${documents.length} volumes',
                     overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.bodySmall,
                   ),
                 ),
               ],
@@ -456,7 +529,7 @@ class _LibraryPageState extends State<LibraryPage> {
                         padding: const EdgeInsets.all(16),
                         gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
                           crossAxisCount: constraints.maxWidth >= 700 ? 2 : 1,
-                          mainAxisExtent: 158,
+                          mainAxisExtent: 144,
                           crossAxisSpacing: 12,
                           mainAxisSpacing: 12,
                         ),
@@ -482,12 +555,29 @@ class _LibraryPageState extends State<LibraryPage> {
                                 padding: const EdgeInsets.all(18),
                                 child: Row(
                                   children: [
-                                    Icon(
-                                      Icons.picture_as_pdf_outlined,
-                                      size: 44,
-                                      color: Theme.of(context)
-                                          .colorScheme
-                                          .primary,
+                                    Container(
+                                      width: 48,
+                                      height: 62,
+                                      decoration: BoxDecoration(
+                                        color: Theme.of(context)
+                                            .colorScheme
+                                            .primary
+                                            .withValues(alpha: 0.12),
+                                        borderRadius: BorderRadius.circular(10),
+                                        border: Border.all(
+                                          color: Theme.of(context)
+                                              .colorScheme
+                                              .primary
+                                              .withValues(alpha: 0.25),
+                                        ),
+                                      ),
+                                      child: Icon(
+                                        Icons.menu_book_rounded,
+                                        size: 26,
+                                        color: Theme.of(
+                                          context,
+                                        ).colorScheme.primary,
+                                      ),
                                     ),
                                     const SizedBox(width: 16),
                                     Expanded(
@@ -499,18 +589,36 @@ class _LibraryPageState extends State<LibraryPage> {
                                         children: [
                                           Text(
                                             '${document['name']}',
-                                            maxLines: 3,
+                                            maxLines: 2,
                                             overflow: TextOverflow.ellipsis,
                                             style: Theme.of(context)
                                                 .textTheme
-                                                .titleMedium,
+                                                .titleMedium
+                                                ?.copyWith(
+                                                  fontWeight: FontWeight.w600,
+                                                ),
                                           ),
-                                          const SizedBox(height: 10),
-                                          const Text('Open & listen'),
+                                          const SizedBox(height: 8),
+                                          Text(
+                                            'Read & listen',
+                                            style: TextStyle(
+                                              fontSize: 12.5,
+                                              color: Theme.of(
+                                                context,
+                                              ).colorScheme.primary,
+                                              fontWeight: FontWeight.w500,
+                                            ),
+                                          ),
                                         ],
                                       ),
                                     ),
-                                    const Icon(Icons.chevron_right),
+                                    Icon(
+                                      Icons.arrow_forward_ios_rounded,
+                                      size: 16,
+                                      color: Theme.of(
+                                        context,
+                                      ).colorScheme.onSurfaceVariant,
+                                    ),
                                   ],
                                 ),
                               ),

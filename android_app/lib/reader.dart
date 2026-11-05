@@ -101,12 +101,12 @@ class _ReaderPageState extends State<ReaderPage>
   double? _lastVisibleTop;
   Timer? _scrollPillHideTimer;
 
-  // Signature OpenReader Obsidian & Aurora Teal-Cyan palette
-  static const _obsidianBarBg = Color(0xff0f141c);
-  static const _obsidianSheetBg = Color(0xff131a24);
-  static const _obsidianCardBg = Color(0xff1e2736);
-  static const _auroraTeal = Color(0xff2dd4bf);
-  static const _auroraCyan = Color(0xff38bdf8);
+  // Warm Editorial Stone, Espresso & Terracotta palette (Readwise / Apple Books / Matter style)
+  static const _obsidianBarBg = Color(0xff181614);
+  static const _obsidianSheetBg = Color(0xff1f1c19);
+  static const _obsidianCardBg = Color(0xff2b2723);
+  static const _auroraTeal = Color(0xffd97757);
+  static const _auroraCyan = Color(0xffe9c46a);
 
   static const _window = MethodChannel('com.homelab.openreader_native/reader');
   static const _darkPageColors = ColorFilter.matrix([
@@ -362,13 +362,13 @@ class _ReaderPageState extends State<ReaderPage>
   Color get _activeBackgroundColor {
     switch (_colorTheme) {
       case 'dark':
-        return const Color(0xff0b0f15);
+        return const Color(0xff121110);
       case 'contrast':
         return Colors.black;
       case 'sepia':
         return const Color(0xffdfd3b8);
       default:
-        return const Color(0xff1b222d);
+        return const Color(0xff262320);
     }
   }
 
@@ -1167,7 +1167,7 @@ class _ReaderPageState extends State<ReaderPage>
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
                 secondary: const Icon(
-                  Icons.water_drop_outlined,
+                  Icons.subject_rounded,
                   color: _auroraTeal,
                 ),
                 title: const Text(
@@ -1442,17 +1442,17 @@ class _ReaderPageState extends State<ReaderPage>
                                     vertical: 2,
                                   ),
                                   decoration: BoxDecoration(
-                                    gradient: const LinearGradient(
-                                      colors: [_auroraTeal, _auroraCyan],
-                                    ),
+                                    color: _obsidianCardBg,
                                     borderRadius: BorderRadius.circular(5),
+                                    border: Border.all(color: Colors.white24, width: 0.8),
                                   ),
                                   child: const Text(
-                                    'AI PDF',
+                                    'PDF',
                                     style: TextStyle(
-                                      color: Colors.black,
+                                      color: Color(0xfff5f1eb),
                                       fontSize: 10,
-                                      fontWeight: FontWeight.w800,
+                                      fontWeight: FontWeight.w700,
+                                      letterSpacing: 0.5,
                                     ),
                                   ),
                                 ),
@@ -2201,7 +2201,7 @@ class _ReaderPageState extends State<ReaderPage>
                 onPressed: _changingFullscreen
                     ? null
                     : () => _setFullscreen(false),
-                icon: const Icon(Icons.fullscreen_exit, color: Colors.white),
+                icon: const Icon(Icons.close_fullscreen_rounded, size: 19, color: Colors.white),
               ),
             ],
           ),
@@ -2318,7 +2318,7 @@ class _ReaderPageState extends State<ReaderPage>
             child: Row(
               children: [
                 const Icon(
-                  Icons.water_drop_outlined,
+                  Icons.subject_rounded,
                   size: 18,
                   color: _auroraTeal,
                 ),
@@ -2724,7 +2724,7 @@ class _ReaderPageState extends State<ReaderPage>
           child: Row(
             children: [
               const Icon(
-                Icons.graphic_eq_rounded,
+                Icons.pause_circle_outline_rounded,
                 size: 16,
                 color: _auroraTeal,
               ),
@@ -2786,7 +2786,7 @@ class _ReaderPageState extends State<ReaderPage>
                   const SizedBox(width: 4),
                   IconButton(
                     tooltip: 'Back',
-                    icon: const Icon(Icons.arrow_back, color: Colors.white),
+                    icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 19, color: Colors.white),
                     onPressed: () => Navigator.maybePop(context),
                   ),
                   Container(width: 1, height: 22, color: Colors.white24),
@@ -2811,7 +2811,7 @@ class _ReaderPageState extends State<ReaderPage>
                   isSelected: _reflowMode,
                   onPressed: () => setState(() => _reflowMode = !_reflowMode),
                   icon: Icon(
-                    Icons.water_drop_outlined,
+                    Icons.subject_rounded,
                     color: _reflowMode ? _auroraTeal : Colors.white,
                   ),
                 ),
@@ -2830,7 +2830,7 @@ class _ReaderPageState extends State<ReaderPage>
                         : _playback.toggle,
                     icon: Icon(
                       _playback.wantedPlaying
-                          ? Icons.graphic_eq_rounded
+                          ? Icons.pause_circle_outline_rounded
                           : Icons.headphones_outlined,
                       color: _playback.wantedPlaying
                           ? _auroraTeal
@@ -2853,7 +2853,7 @@ class _ReaderPageState extends State<ReaderPage>
                   key: const Key('share-save-button'),
                   tooltip: 'Save to device or Share',
                   onPressed: _pdfBytes != null ? _showShareAndSaveSheet : null,
-                  icon: const Icon(Icons.share_outlined, color: Colors.white),
+                  icon: const Icon(Icons.ios_share_rounded, size: 20, color: Colors.white),
                 ),
                 _darkPageButton(),
                 _sourceButton(),
@@ -2863,7 +2863,7 @@ class _ReaderPageState extends State<ReaderPage>
                   onPressed: _changingFullscreen
                       ? null
                       : () => _setFullscreen(true),
-                  icon: const Icon(Icons.fullscreen, color: Colors.white),
+                  icon: const Icon(Icons.open_in_full_rounded, size: 19, color: Colors.white),
                 ),
                 // Sleek rounded square ⋮ overflow button with subtle teal border
                 Padding(
@@ -3080,37 +3080,31 @@ class _ReaderPageState extends State<ReaderPage>
         key: const Key('playback-bar'),
         color: _obsidianBarBg,
         padding: const EdgeInsets.fromLTRB(10, 6, 10, 8),
-        child: CustomPaint(
-          foregroundPainter: isPlaying
-              ? _BorderBeamPainter(
-                  progress: _beamController.value,
-                  radius: 22,
-                  colorFrom: _auroraTeal,
-                  colorTo: _auroraCyan,
-                )
-              : null,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-            decoration: BoxDecoration(
-              gradient: const LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: [Color(0xff17202e), Color(0xff101620)],
-              ),
-              borderRadius: BorderRadius.circular(22),
-              border: Border.all(
-                color: isPlaying
-                    ? _auroraTeal.withValues(alpha: 0.35)
-                    : Colors.white12,
-              ),
-              boxShadow: const [
-                BoxShadow(
-                  color: Colors.black54,
-                  blurRadius: 12,
-                  offset: Offset(0, 4),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Subtle Magic UI scroll-progress hairline across top of bottom bar
+            ClipRRect(
+              borderRadius: BorderRadius.circular(2),
+              child: SizedBox(
+                height: 2,
+                child: LinearProgressIndicator(
+                  value: _effectiveMaxPages > 0 ? (_page / _effectiveMaxPages).clamp(0.0, 1.0) : 0.0,
+                  backgroundColor: const Color(0xff2b2723),
+                  color: _auroraTeal,
                 ),
-              ],
+              ),
             ),
+            const SizedBox(height: 4),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              decoration: BoxDecoration(
+                color: _obsidianSheetBg,
+                borderRadius: BorderRadius.circular(18),
+                border: Border.all(
+                  color: const Color(0xff332e29),
+                ),
+              ),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -3322,20 +3316,20 @@ class _ReaderPageState extends State<ReaderPage>
                     ),
                   ),
 
-                // Main 5-item Magic UI Capsule Dock
+                // Main 5-item Editorial Toolbar
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceAround,
                   children: [
                     _adobeBottomBarItem(
                       itemKey: const Key('play-pause'),
                       icon: isPlaying
-                          ? Icons.pause_circle_filled_rounded
-                          : Icons.headphones_rounded,
+                          ? Icons.pause_circle_outline_rounded
+                          : Icons.play_circle_outline_rounded,
                       label: _playback.error != null
                           ? 'Retry'
                           : isPlaying
                           ? 'Pause'
-                          : 'Read aloud',
+                          : 'Listen',
                       active: isPlaying,
                       enabled:
                           _playback.connected &&
@@ -3344,34 +3338,35 @@ class _ReaderPageState extends State<ReaderPage>
                       onTap: _playback.toggle,
                     ),
                     _adobeBottomBarItem(
-                      icon: Icons.play_lesson_outlined,
+                      icon: Icons.record_voice_over_outlined,
                       label: 'Read page',
                       enabled: _playback.connected && !_playback.preparing,
                       onTap: () => _readPage(_page),
                     ),
                     _adobeBottomBarItem(
                       itemKey: const Key('toggle-transcript'),
-                      icon: Icons.subtitles_outlined,
-                      label: 'Transcript',
+                      icon: Icons.short_text_rounded,
+                      label: 'Follow text',
                       active: _transcriptVisible,
                       onTap: () =>
                           setState(() => _transcript = !_transcriptVisible),
                     ),
                     _adobeBottomBarItem(
-                      icon: Icons.grid_view_rounded,
+                      icon: Icons.grid_view_outlined,
                       label: 'Pages',
                       onTap: () => _showNavigationSheet(initialTab: 1),
                     ),
                     _adobeBottomBarItem(
-                      icon: Icons.more_horiz_rounded,
-                      label: 'More tools',
+                      icon: Icons.tune_rounded,
+                      label: 'Options',
                       onTap: _showAdobeMoreSheet,
                     ),
                   ],
                 ),
               ],
             ),
-          ),
+            ),
+          ],
         ),
       );
     },
@@ -3428,49 +3423,6 @@ class _ReaderPageState extends State<ReaderPage>
   }
 }
 
-/// Magic UI `BorderBeam` port for Flutter: paints a smooth traveling aurora
-/// gradient beam around the rounded dock perimeter while audio is playing.
-class _BorderBeamPainter extends CustomPainter {
-  const _BorderBeamPainter({
-    required this.progress,
-    required this.radius,
-    required this.colorFrom,
-    required this.colorTo,
-  });
-  final double progress;
-  final double radius;
-  final Color colorFrom;
-  final Color colorTo;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final rect = Offset.zero & size;
-    final rrect = RRect.fromRectAndRadius(
-      rect.deflate(0.75),
-      Radius.circular(radius),
-    );
-    final angle = progress * 2 * math.pi;
-    final paint = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.8
-      ..shader = SweepGradient(
-        colors: [
-          Colors.transparent,
-          colorFrom.withValues(alpha: 0.85),
-          colorTo,
-          Colors.transparent,
-        ],
-        stops: const [0.0, 0.15, 0.28, 0.45],
-        transform: GradientRotation(angle),
-      ).createShader(rect);
-    canvas.drawRRect(rrect, paint);
-  }
-
-  @override
-  bool shouldRepaint(_BorderBeamPainter oldDelegate) =>
-      oldDelegate.progress != progress;
-}
-
 /// Upgraded Word Highlight Painter: draws a smooth rounded capsule with soft
 /// outer glow and crisp bottom accent line instead of a flat rectangle.
 class _WordPainter extends CustomPainter {
@@ -3482,13 +3434,12 @@ class _WordPainter extends CustomPainter {
     final value = highlight.value;
     if (value == null || value.page != page.pageNumber) return;
     final glowPaint = Paint()
-      ..color = const Color(0xff2dd4bf).withValues(alpha: 0.24)
-      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4);
+      ..color = const Color(0xffe9c46a).withValues(alpha: 0.18);
     final fillPaint = Paint()
-      ..color = const Color(0xffffd84d).withValues(alpha: 0.46);
+      ..color = const Color(0xfff4a261).withValues(alpha: 0.40);
     final underlinePaint = Paint()
-      ..color = const Color(0xff14b8a6).withValues(alpha: 0.85)
-      ..strokeWidth = 1.8
+      ..color = const Color(0xffd97757).withValues(alpha: 0.90)
+      ..strokeWidth = 1.6
       ..style = PaintingStyle.stroke;
 
     for (final rect in value.rects) {
