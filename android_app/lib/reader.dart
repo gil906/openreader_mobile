@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
+import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -54,12 +55,14 @@ class _SearchMatch {
   final int matchEnd;
 }
 
-class _ReaderPageState extends State<ReaderPage> {
+class _ReaderPageState extends State<ReaderPage>
+    with SingleTickerProviderStateMixin {
   final _viewer = PdfViewerController();
   final _highlight = ValueNotifier<_PageHighlight?>(null);
   final Map<int, PdfPageRawText?> _texts = {};
   final Set<int> _loadingText = {};
   late ReaderPlayback _playback;
+  late final AnimationController _beamController;
   OfflineDocument? _savedDocument;
   Json? _serverDocument;
   final List<OpenReaderApi> _ownedApis = [];
@@ -88,17 +91,20 @@ class _ReaderPageState extends State<ReaderPage> {
   bool _changingFullscreen = false;
   bool _savingOffline = false;
 
-  // Adobe-style right-edge fast scroll pill state:
-  // Only appears when scrolling the document or grabbing the pill.
+  // Auto-hiding right-edge fast-scroll pill state:
+  // Appears only when scrolling the document or grabbing the pill.
   bool _scrollPillVisible = false;
   bool _draggingScrollPill = false;
   int? _dragTargetPage;
   double? _lastVisibleTop;
   Timer? _scrollPillHideTimer;
 
-  static const _adobeBarBg = Color(0xff1c1c1e);
-  static const _adobeSheetBg = Color(0xff202024);
-  static const _adobeButtonBg = Color(0xff2c2c30);
+  // Signature OpenReader Obsidian & Aurora Teal-Cyan palette
+  static const _obsidianBarBg = Color(0xff0f141c);
+  static const _obsidianSheetBg = Color(0xff131a24);
+  static const _obsidianCardBg = Color(0xff1e2736);
+  static const _auroraTeal = Color(0xff2dd4bf);
+  static const _auroraCyan = Color(0xff38bdf8);
 
   static const _window = MethodChannel('com.homelab.openreader_native/reader');
   static const _darkPageColors = ColorFilter.matrix([
@@ -141,6 +147,10 @@ class _ReaderPageState extends State<ReaderPage> {
   @override
   void initState() {
     super.initState();
+    _beamController = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 4),
+    )..repeat();
     _pdfDark = widget.preferences.getBool('pdfDarkMode') ?? false;
     _colorTheme =
         widget.preferences.getString('pdfColorTheme') ??
@@ -350,13 +360,13 @@ class _ReaderPageState extends State<ReaderPage> {
   Color get _activeBackgroundColor {
     switch (_colorTheme) {
       case 'dark':
-        return const Color(0xff141416);
+        return const Color(0xff0b0f15);
       case 'contrast':
         return Colors.black;
       case 'sepia':
         return const Color(0xffdfd3b8);
       default:
-        return const Color(0xff2b2b2e);
+        return const Color(0xff1b222d);
     }
   }
 
@@ -365,16 +375,16 @@ class _ReaderPageState extends State<ReaderPage> {
     sourceName: widget.document['id'] as String,
     controller: _viewer,
     params: PdfViewerParams(
-      margin: 4,
+      margin: 5,
       panAxis: PanAxis.free,
       boundaryMargin: EdgeInsets.zero,
       sizeDelegateProvider: const PdfViewerSizeDelegateProviderSmart(),
       backgroundColor: _activeBackgroundColor,
       pageImageColorFilter: _activeColorFilter,
       pageDropShadow: const BoxShadow(
-        color: Colors.black38,
-        blurRadius: 3,
-        offset: Offset(0, 1),
+        color: Colors.black45,
+        blurRadius: 6,
+        offset: Offset(0, 2),
       ),
       onGeneralTap: (context, controller, details) {
         if (details.type != PdfViewerGeneralTapType.tap ||
@@ -607,9 +617,9 @@ class _ReaderPageState extends State<ReaderPage> {
     final number = await showDialog<int>(
       context: context,
       builder: (context) => AlertDialog(
-        backgroundColor: _adobeSheetBg,
+        backgroundColor: _obsidianSheetBg,
         title: const Text(
-          'Go to page',
+          'Jump to page',
           style: TextStyle(color: Colors.white),
         ),
         content: TextField(
@@ -745,6 +755,22 @@ class _ReaderPageState extends State<ReaderPage> {
     return items;
   }
 
+  String _pageTopicPreview(int targetPage) {
+    for (final seg in _playback.plan) {
+      final p = integer(object(seg['locator'])['page'], 1);
+      if (p == targetPage) {
+        final raw = '${seg['text'] ?? ''}'.trim().replaceAll(
+          RegExp(r'\s+'),
+          ' ',
+        );
+        if (raw.isNotEmpty) {
+          return raw.length > 56 ? '${raw.substring(0, 56)}…' : raw;
+        }
+      }
+    }
+    return _bookmarks.contains(targetPage) ? '★ Bookmarked page' : '';
+  }
+
   Future<void> _showNavigationSheet({int initialTab = 0}) async {
     final outline = _extractOutline();
     final totalPages = _effectiveMaxPages;
@@ -755,18 +781,18 @@ class _ReaderPageState extends State<ReaderPage> {
     }
     await showModalBottomSheet<void>(
       context: context,
-      backgroundColor: _adobeSheetBg,
+      backgroundColor: _obsidianSheetBg,
       isScrollControlled: true,
       useSafeArea: true,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
       builder: (sheetContext) => Theme(
         data: ThemeData.dark(useMaterial3: true).copyWith(
-          scaffoldBackgroundColor: _adobeSheetBg,
+          scaffoldBackgroundColor: _obsidianSheetBg,
           colorScheme: const ColorScheme.dark(
-            surface: _adobeSheetBg,
-            primary: Color(0xff4da3ff),
+            surface: _obsidianSheetBg,
+            primary: _auroraTeal,
           ),
         ),
         child: DefaultTabController(
@@ -790,6 +816,8 @@ class _ReaderPageState extends State<ReaderPage> {
                 ),
                 const SizedBox(height: 6),
                 const TabBar(
+                  indicatorColor: _auroraTeal,
+                  labelColor: _auroraTeal,
                   tabs: [
                     Tab(
                       icon: Icon(Icons.toc_rounded),
@@ -813,8 +841,10 @@ class _ReaderPageState extends State<ReaderPage> {
                           : ListView.separated(
                               controller: scrollController,
                               itemCount: outline.length,
-                              separatorBuilder: (_, _) =>
-                                  const Divider(height: 1, color: Colors.white12),
+                              separatorBuilder: (_, _) => const Divider(
+                                height: 1,
+                                color: Colors.white12,
+                              ),
                               itemBuilder: (context, index) {
                                 final item = outline[index];
                                 final active = item.page == _page;
@@ -823,13 +853,16 @@ class _ReaderPageState extends State<ReaderPage> {
                                   leading: CircleAvatar(
                                     radius: 16,
                                     backgroundColor: active
-                                        ? const Color(0xff4da3ff)
-                                        : _adobeButtonBg,
+                                        ? _auroraTeal
+                                        : _obsidianCardBg,
                                     child: Text(
                                       '${item.page}',
-                                      style: const TextStyle(
+                                      style: TextStyle(
                                         fontSize: 12,
-                                        color: Colors.white,
+                                        fontWeight: FontWeight.bold,
+                                        color: active
+                                            ? Colors.black
+                                            : Colors.white,
                                       ),
                                     ),
                                   ),
@@ -843,11 +876,14 @@ class _ReaderPageState extends State<ReaderPage> {
                                     tooltip: 'Read from here',
                                     icon: const Icon(
                                       Icons.play_circle_fill_rounded,
+                                      color: _auroraTeal,
                                     ),
                                     onPressed: () {
                                       Navigator.pop(sheetContext);
                                       unawaited(_goTo(item.page));
-                                      unawaited(_playback.startAt(item.ordinal));
+                                      unawaited(
+                                        _playback.startAt(item.ordinal),
+                                      );
                                     },
                                   ),
                                   onTap: () {
@@ -882,7 +918,7 @@ class _ReaderPageState extends State<ReaderPage> {
                           final isCurrent = p == _page;
                           final isBookmarked = _bookmarks.contains(p);
                           return InkWell(
-                            borderRadius: BorderRadius.circular(12),
+                            borderRadius: BorderRadius.circular(14),
                             onTap: () {
                               Navigator.pop(sheetContext);
                               unawaited(_goTo(p));
@@ -891,12 +927,12 @@ class _ReaderPageState extends State<ReaderPage> {
                               padding: const EdgeInsets.all(10),
                               decoration: BoxDecoration(
                                 color: isCurrent
-                                    ? const Color(0xff263b54)
-                                    : _adobeButtonBg,
-                                borderRadius: BorderRadius.circular(12),
+                                    ? const Color(0xff143338)
+                                    : _obsidianCardBg,
+                                borderRadius: BorderRadius.circular(14),
                                 border: Border.all(
                                   color: isCurrent
-                                      ? const Color(0xff4da3ff)
+                                      ? _auroraTeal
                                       : Colors.white12,
                                   width: isCurrent ? 2 : 1,
                                 ),
@@ -919,7 +955,7 @@ class _ReaderPageState extends State<ReaderPage> {
                                         const Icon(
                                           Icons.star_rounded,
                                           size: 16,
-                                          color: Color(0xff4da3ff),
+                                          color: _auroraTeal,
                                         ),
                                     ],
                                   ),
@@ -956,7 +992,7 @@ class _ReaderPageState extends State<ReaderPage> {
                                         child: const Icon(
                                           Icons.headphones_rounded,
                                           size: 16,
-                                          color: Colors.white70,
+                                          color: _auroraTeal,
                                         ),
                                       ),
                                     ],
@@ -994,8 +1030,10 @@ class _ReaderPageState extends State<ReaderPage> {
                           }
                           return ListView.separated(
                             itemCount: sorted.length,
-                            separatorBuilder: (_, _) =>
-                                const Divider(height: 1, color: Colors.white12),
+                            separatorBuilder: (_, _) => const Divider(
+                              height: 1,
+                              color: Colors.white12,
+                            ),
                             itemBuilder: (context, index) {
                               final p = sorted[index];
                               final segs = byPage[p] ?? const [];
@@ -1005,7 +1043,7 @@ class _ReaderPageState extends State<ReaderPage> {
                               return ListTile(
                                 leading: const Icon(
                                   Icons.bookmark_rounded,
-                                  color: Color(0xff4da3ff),
+                                  color: _auroraTeal,
                                 ),
                                 title: Text('Page $p'),
                                 subtitle: Text(
@@ -1020,6 +1058,7 @@ class _ReaderPageState extends State<ReaderPage> {
                                       tooltip: 'Read page $p',
                                       icon: const Icon(
                                         Icons.headphones_rounded,
+                                        color: _auroraTeal,
                                       ),
                                       onPressed: () {
                                         Navigator.pop(sheetContext);
@@ -1060,10 +1099,10 @@ class _ReaderPageState extends State<ReaderPage> {
   Future<void> _showViewSettingsSheet() async {
     await showModalBottomSheet<void>(
       context: context,
-      backgroundColor: _adobeSheetBg,
+      backgroundColor: _obsidianSheetBg,
       useSafeArea: true,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
       builder: (sheetContext) => StatefulBuilder(
         builder: (context, setModalState) => Padding(
@@ -1127,7 +1166,7 @@ class _ReaderPageState extends State<ReaderPage> {
                 contentPadding: EdgeInsets.zero,
                 secondary: const Icon(
                   Icons.water_drop_outlined,
-                  color: Colors.white70,
+                  color: _auroraTeal,
                 ),
                 title: const Text(
                   'Liquid Reading Mode (Reflow)',
@@ -1147,7 +1186,7 @@ class _ReaderPageState extends State<ReaderPage> {
                 contentPadding: EdgeInsets.zero,
                 secondary: const Icon(
                   Icons.my_location_rounded,
-                  color: Colors.white70,
+                  color: _auroraTeal,
                 ),
                 title: const Text(
                   'Follow narration automatically',
@@ -1167,10 +1206,10 @@ class _ReaderPageState extends State<ReaderPage> {
                 contentPadding: EdgeInsets.zero,
                 secondary: const Icon(
                   Icons.subtitles_outlined,
-                  color: Colors.white70,
+                  color: _auroraTeal,
                 ),
                 title: const Text(
-                  'Show Now Reading transcript panel',
+                  'Show full Now Reading transcript drawer',
                   style: TextStyle(color: Colors.white),
                 ),
                 value: _transcriptVisible,
@@ -1189,10 +1228,10 @@ class _ReaderPageState extends State<ReaderPage> {
   Future<void> _showVoiceAndSpeedSheet() async {
     await showModalBottomSheet<void>(
       context: context,
-      backgroundColor: _adobeSheetBg,
+      backgroundColor: _obsidianSheetBg,
       useSafeArea: true,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
       builder: (sheetContext) => AnimatedBuilder(
         animation: _playback,
@@ -1316,20 +1355,24 @@ class _ReaderPageState extends State<ReaderPage> {
     );
   }
 
-  /// Adobe Acrobat Reader Android-style overflow bottom sheet (Screenshot 1),
-  /// containing only features relevant to OpenReader.
+  /// OpenReader Obsidian overflow sheet with Magic UI circular progress ring
+  /// and only OpenReader-relevant tools.
   Future<void> _showAdobeMoreSheet() async {
     await showModalBottomSheet<void>(
       context: context,
-      backgroundColor: _adobeSheetBg,
+      backgroundColor: _obsidianSheetBg,
       isScrollControlled: true,
       useSafeArea: true,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(26)),
       ),
       builder: (sheetContext) => StatefulBuilder(
         builder: (context, setModalState) {
           final isBookmarked = _bookmarks.contains(_page);
+          final maxPages = _effectiveMaxPages;
+          final pct = maxPages > 1
+              ? ((_page / maxPages) * 100).round().clamp(1, 100)
+              : 100;
           return SingleChildScrollView(
             padding: const EdgeInsets.only(top: 10, bottom: 20),
             child: Column(
@@ -1344,10 +1387,36 @@ class _ReaderPageState extends State<ReaderPage> {
                   ),
                 ),
                 Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 16, 12, 12),
+                  padding: const EdgeInsets.fromLTRB(20, 16, 12, 14),
                   child: Row(
                     crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
+                      // Magic UI-inspired Animated Circular Progress Gauge
+                      SizedBox(
+                        width: 46,
+                        height: 46,
+                        child: Stack(
+                          alignment: Alignment.center,
+                          children: [
+                            CircularProgressIndicator(
+                              value: maxPages > 0 ? _page / maxPages : 1.0,
+                              strokeWidth: 4,
+                              backgroundColor: Colors.white12,
+                              color: _auroraTeal,
+                              strokeCap: StrokeCap.round,
+                            ),
+                            Text(
+                              '$pct%',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 11,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 14),
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
@@ -1358,35 +1427,37 @@ class _ReaderPageState extends State<ReaderPage> {
                               overflow: TextOverflow.ellipsis,
                               style: const TextStyle(
                                 color: Colors.white,
-                                fontSize: 18,
+                                fontSize: 17,
                                 fontWeight: FontWeight.w700,
                               ),
                             ),
-                            const SizedBox(height: 6),
+                            const SizedBox(height: 5),
                             Row(
                               children: [
                                 Container(
                                   padding: const EdgeInsets.symmetric(
-                                    horizontal: 5,
+                                    horizontal: 6,
                                     vertical: 2,
                                   ),
                                   decoration: BoxDecoration(
-                                    color: const Color(0xffd9232e),
-                                    borderRadius: BorderRadius.circular(4),
+                                    gradient: const LinearGradient(
+                                      colors: [_auroraTeal, _auroraCyan],
+                                    ),
+                                    borderRadius: BorderRadius.circular(5),
                                   ),
                                   child: const Text(
-                                    'PDF',
+                                    'AI PDF',
                                     style: TextStyle(
-                                      color: Colors.white,
+                                      color: Colors.black,
                                       fontSize: 10,
-                                      fontWeight: FontWeight.bold,
+                                      fontWeight: FontWeight.w800,
                                     ),
                                   ),
                                 ),
                                 const SizedBox(width: 8),
                                 Expanded(
                                   child: Text(
-                                    'Page $_page of $_effectiveMaxPages  •  ${_playback.voice}',
+                                    'Page $_page of $maxPages  •  ${_playback.voice}',
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
                                     style: const TextStyle(
@@ -1412,9 +1483,7 @@ class _ReaderPageState extends State<ReaderPage> {
                           isBookmarked
                               ? Icons.star_rounded
                               : Icons.star_border_rounded,
-                          color: isBookmarked
-                              ? const Color(0xff4da3ff)
-                              : Colors.white70,
+                          color: isBookmarked ? _auroraTeal : Colors.white70,
                           size: 28,
                         ),
                       ),
@@ -1540,19 +1609,19 @@ class _ReaderPageState extends State<ReaderPage> {
     contentPadding: const EdgeInsets.symmetric(horizontal: 22, vertical: 2),
     leading: Icon(
       icon,
-      color: enabled ? Colors.white : Colors.white38,
-      size: 24,
+      color: enabled ? _auroraTeal : Colors.white38,
+      size: 23,
     ),
     title: Text(
       title,
       style: TextStyle(
         color: enabled ? Colors.white : Colors.white38,
-        fontSize: 16,
+        fontSize: 15.5,
         fontWeight: FontWeight.w400,
       ),
     ),
     trailing: trailingChevron
-        ? const Icon(Icons.chevron_right_rounded, color: Colors.white70)
+        ? const Icon(Icons.chevron_right_rounded, color: Colors.white54)
         : null,
     onTap: enabled ? onTap : null,
   );
@@ -1814,7 +1883,7 @@ class _ReaderPageState extends State<ReaderPage> {
     isSelected: _pdfDark,
     icon: Icon(
       _pdfDark ? Icons.light_mode_outlined : Icons.dark_mode_outlined,
-      color: Colors.white,
+      color: _pdfDark ? _auroraTeal : Colors.white,
     ),
   );
 
@@ -1825,9 +1894,9 @@ class _ReaderPageState extends State<ReaderPage> {
       child: Padding(
         padding: const EdgeInsets.all(8),
         child: Material(
-          color: _adobeBarBg.withValues(alpha: 0.92),
+          color: _obsidianBarBg.withValues(alpha: 0.92),
           borderRadius: BorderRadius.circular(28),
-          elevation: 3,
+          elevation: 4,
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -1850,14 +1919,16 @@ class _ReaderPageState extends State<ReaderPage> {
                           height: 18,
                           child: CircularProgressIndicator(
                             strokeWidth: 2,
-                            color: Colors.white,
+                            color: _auroraTeal,
                           ),
                         )
                       : Icon(
                           _playback.wantedPlaying
                               ? Icons.pause_rounded
                               : Icons.play_arrow_rounded,
-                          color: Colors.white,
+                          color: _playback.wantedPlaying
+                              ? _auroraTeal
+                              : Colors.white,
                         ),
                 ),
               ),
@@ -1878,6 +1949,7 @@ class _ReaderPageState extends State<ReaderPage> {
 
   @override
   void dispose() {
+    _beamController.dispose();
     _scrollPillHideTimer?.cancel();
     _viewer.removeListener(_onViewerScrolled);
     _searchController.dispose();
@@ -1908,7 +1980,7 @@ class _ReaderPageState extends State<ReaderPage> {
   }
 
   Widget _buildSearchBar() => Material(
-    color: _adobeSheetBg,
+    color: _obsidianSheetBg,
     child: Padding(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       child: Row(
@@ -1925,12 +1997,12 @@ class _ReaderPageState extends State<ReaderPage> {
                 prefixIcon: const Icon(
                   Icons.search,
                   size: 20,
-                  color: Colors.white70,
+                  color: _auroraTeal,
                 ),
                 suffixText: _searchMatches.isEmpty
                     ? (_searchController.text.isEmpty ? '' : '0/0')
                     : '${_searchIndex + 1}/${_searchMatches.length}',
-                suffixStyle: const TextStyle(color: Colors.white70),
+                suffixStyle: const TextStyle(color: _auroraTeal),
                 border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(20),
                 ),
@@ -1979,13 +2051,13 @@ class _ReaderPageState extends State<ReaderPage> {
         children: [
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-            color: _adobeSheetBg,
+            color: _obsidianSheetBg,
             child: Row(
               children: [
                 const Icon(
                   Icons.water_drop_outlined,
                   size: 18,
-                  color: Color(0xff4da3ff),
+                  color: _auroraTeal,
                 ),
                 const SizedBox(width: 8),
                 Expanded(
@@ -2104,15 +2176,20 @@ class _ReaderPageState extends State<ReaderPage> {
     },
   );
 
-  /// Adobe Acrobat Reader Android-style right-edge black scroll pill + center
-  /// page indicator overlay (Screenshots 2 & 3).
-  /// Only appears when scrolling the document or while grabbing the pill.
-  Widget _buildAdobeScrollOverlay(BuildContext viewportContext, BoxConstraints viewportConstraints) {
+  /// Upgraded auto-hiding right-edge scroll pill + Smart Scrubbing HUD:
+  /// - Only appears while scrolling or dragging.
+  /// - Shows a vertical aurora progress bar on the pill + bookmark star badge.
+  /// - While dragging, the center HUD card displays the page number (`196 / of 329`),
+  ///   percentage ring, AND live topic/heading preview of that page!
+  Widget _buildAdobeScrollOverlay(
+    BuildContext viewportContext,
+    BoxConstraints viewportConstraints,
+  ) {
     final maxPages = _effectiveMaxPages;
     final activePage = (_dragTargetPage ?? _page).clamp(1, maxPages);
     final showPill =
         (_scrollPillVisible || _draggingScrollPill) && maxPages > 1;
-    const pillHeight = 40.0;
+    const pillHeight = 42.0;
     const topMargin = 14.0;
     const bottomMargin = 14.0;
     final usableTrack = math.max(
@@ -2123,6 +2200,10 @@ class _ReaderPageState extends State<ReaderPage> {
         ? ((activePage - 1) / (maxPages - 1)).clamp(0.0, 1.0)
         : 0.0;
     final pillTop = topMargin + fraction * usableTrack;
+    final isBookmarked = _bookmarks.contains(activePage);
+    final topicPreview = _draggingScrollPill
+        ? _pageTopicPreview(activePage)
+        : '';
 
     void scrubAtLocalDy(double dy) {
       final ratio = ((dy - topMargin - pillHeight / 2) / usableTrack).clamp(
@@ -2145,53 +2226,92 @@ class _ReaderPageState extends State<ReaderPage> {
 
     return Stack(
       children: [
-        // Center dark rounded square indicator ("196 / of 329") shown while scrubbing
+        // Smart Center Scrubbing HUD (Page + Progress Ring + Live Topic Preview)
         if (_draggingScrollPill)
           Center(
             child: IgnorePointer(
-              child: Container(
-                width: 118,
-                height: 118,
-                decoration: BoxDecoration(
-                  color: const Color(0xf0222225),
-                  borderRadius: BorderRadius.circular(14),
-                  boxShadow: const [
-                    BoxShadow(
-                      color: Colors.black45,
-                      blurRadius: 14,
-                      offset: Offset(0, 4),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(20),
+                child: BackdropFilter(
+                  filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
+                  child: Container(
+                    width: 196,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 18,
+                      vertical: 16,
                     ),
-                  ],
-                ),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Text(
-                      '$activePage',
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 28,
-                        fontWeight: FontWeight.w500,
+                    decoration: BoxDecoration(
+                      color: _obsidianBarBg.withValues(alpha: 0.90),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(
+                        color: _auroraTeal.withValues(alpha: 0.45),
+                        width: 1.2,
                       ),
+                      boxShadow: const [
+                        BoxShadow(
+                          color: Colors.black54,
+                          blurRadius: 20,
+                          offset: Offset(0, 6),
+                        ),
+                      ],
                     ),
-                    const SizedBox(height: 6),
-                    Container(width: 72, height: 1, color: Colors.white38),
-                    const SizedBox(height: 6),
-                    Text(
-                      'of $maxPages',
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 18,
-                        fontStyle: FontStyle.italic,
-                      ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          '$activePage',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 32,
+                            fontWeight: FontWeight.w700,
+                            height: 1.05,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(3),
+                          child: SizedBox(
+                            width: 96,
+                            height: 3,
+                            child: LinearProgressIndicator(
+                              value: maxPages > 0 ? activePage / maxPages : 1.0,
+                              backgroundColor: Colors.white24,
+                              color: _auroraTeal,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          'of $maxPages',
+                          style: const TextStyle(
+                            color: Colors.white70,
+                            fontSize: 16,
+                            fontStyle: FontStyle.italic,
+                          ),
+                        ),
+                        if (topicPreview.isNotEmpty) ...[
+                          const SizedBox(height: 8),
+                          Text(
+                            topicPreview,
+                            maxLines: 2,
+                            textAlign: TextAlign.center,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: _auroraTeal,
+                              fontSize: 11.5,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ],
+                      ],
                     ),
-                  ],
+                  ),
                 ),
               ),
             ),
           ),
 
-        // Right-edge black pill tab ("142" / "199") — only visible while scrolling/dragging
+        // Auto-hiding Right-Edge Fast-Scroll Pill with Aurora Accent Bar
         Positioned(
           top: pillTop,
           right: 0,
@@ -2212,7 +2332,8 @@ class _ReaderPageState extends State<ReaderPage> {
                   });
                 },
                 onVerticalDragUpdate: (details) {
-                  final box = viewportContext.findRenderObject() as RenderBox?;
+                  final box =
+                      viewportContext.findRenderObject() as RenderBox?;
                   if (box == null) return;
                   final local = box.globalToLocal(details.globalPosition);
                   scrubAtLocalDy(local.dy);
@@ -2235,28 +2356,57 @@ class _ReaderPageState extends State<ReaderPage> {
                 },
                 child: Container(
                   height: pillHeight,
-                  padding: const EdgeInsets.fromLTRB(18, 8, 14, 8),
-                  decoration: const BoxDecoration(
-                    color: Color(0xf21e1e21),
-                    borderRadius: BorderRadius.horizontal(
+                  padding: const EdgeInsets.fromLTRB(14, 6, 12, 6),
+                  decoration: BoxDecoration(
+                    color: _obsidianBarBg.withValues(alpha: 0.94),
+                    borderRadius: const BorderRadius.horizontal(
                       left: Radius.circular(22),
                     ),
-                    boxShadow: [
+                    border: Border(
+                      left: BorderSide(
+                        color: _draggingScrollPill ? _auroraCyan : _auroraTeal,
+                        width: 2.5,
+                      ),
+                      top: const BorderSide(color: Colors.white12, width: 0.8),
+                      bottom: const BorderSide(
+                        color: Colors.white12,
+                        width: 0.8,
+                      ),
+                    ),
+                    boxShadow: const [
                       BoxShadow(
-                        color: Colors.black38,
-                        blurRadius: 6,
-                        offset: Offset(-1, 2),
+                        color: Colors.black45,
+                        blurRadius: 8,
+                        offset: Offset(-2, 2),
                       ),
                     ],
                   ),
-                  alignment: Alignment.center,
-                  child: Text(
-                    '$activePage',
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 15,
-                      fontWeight: FontWeight.w500,
-                    ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (isBookmarked) ...[
+                        const Icon(
+                          Icons.star_rounded,
+                          size: 13,
+                          color: _auroraTeal,
+                        ),
+                        const SizedBox(width: 4),
+                      ],
+                      Text(
+                        '$activePage',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 14.5,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(width: 3),
+                      const Icon(
+                        Icons.drag_indicator_rounded,
+                        size: 13,
+                        color: Colors.white54,
+                      ),
+                    ],
                   ),
                 ),
               ),
@@ -2264,6 +2414,91 @@ class _ReaderPageState extends State<ReaderPage> {
           ),
         ),
       ],
+    );
+  }
+
+  /// Live Karaoke Mini-Caption Pill shown right above the dock while Read Aloud
+  /// is playing and the full transcript drawer is closed — something Adobe lacks!
+  Widget _buildLiveKaraokeMiniPill() {
+    final segment = _playback.plan
+        .where(
+          (segment) => integer(segment['ordinal']) == _playback.currentOrdinal,
+        )
+        .firstOrNull;
+    final text = (segment?['text'] as String? ?? '').trim();
+    if (text.isEmpty) return const SizedBox.shrink();
+    final word = _playback.activeWord;
+    final start = word?.start ?? -1;
+    final end = word?.end ?? -1;
+
+    // Extract a compact window around the active spoken word so it fits in 1-2 lines
+    var snippet = text;
+    var relStart = start;
+    var relEnd = end;
+    if (start >= 0 && end > start && end <= text.length && text.length > 90) {
+      final winStart = math.max(0, start - 32);
+      final winEnd = math.min(text.length, end + 48);
+      snippet =
+          '${winStart > 0 ? '…' : ''}${text.substring(winStart, winEnd)}${winEnd < text.length ? '…' : ''}';
+      final prefixOffset = winStart > 0 ? 1 : 0;
+      relStart = start - winStart + prefixOffset;
+      relEnd = end - winStart + prefixOffset;
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(14),
+        onTap: () => setState(() => _transcript = true),
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+          decoration: BoxDecoration(
+            color: _obsidianCardBg.withValues(alpha: 0.85),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: _auroraTeal.withValues(alpha: 0.30)),
+          ),
+          child: Row(
+            children: [
+              const Icon(
+                Icons.graphic_eq_rounded,
+                size: 16,
+                color: _auroraTeal,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text.rich(
+                  TextSpan(
+                    children:
+                        relStart >= 0 &&
+                            relEnd > relStart &&
+                            relEnd <= snippet.length
+                        ? [
+                            TextSpan(text: snippet.substring(0, relStart)),
+                            TextSpan(
+                              text: snippet.substring(relStart, relEnd),
+                              style: const TextStyle(
+                                backgroundColor: _auroraTeal,
+                                color: Colors.black,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                            TextSpan(text: snippet.substring(relEnd)),
+                          ]
+                        : [TextSpan(text: snippet)],
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 12.5,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
@@ -2278,7 +2513,7 @@ class _ReaderPageState extends State<ReaderPage> {
       appBar: _fullscreen
           ? null
           : AppBar(
-              backgroundColor: _adobeBarBg,
+              backgroundColor: _obsidianBarBg,
               foregroundColor: Colors.white,
               elevation: 0,
               leadingWidth: 64,
@@ -2301,11 +2536,11 @@ class _ReaderPageState extends State<ReaderPage> {
                 style: const TextStyle(
                   color: Colors.white,
                   fontSize: 15,
-                  fontWeight: FontWeight.w500,
+                  fontWeight: FontWeight.w600,
                 ),
               ),
               actions: [
-                // Adobe Liquid / Reflow Mode icon
+                // Liquid / Reflow Mode icon
                 IconButton(
                   tooltip: _reflowMode
                       ? 'Switch to PDF Page View'
@@ -2314,12 +2549,10 @@ class _ReaderPageState extends State<ReaderPage> {
                   onPressed: () => setState(() => _reflowMode = !_reflowMode),
                   icon: Icon(
                     Icons.water_drop_outlined,
-                    color: _reflowMode
-                        ? const Color(0xff4da3ff)
-                        : Colors.white,
+                    color: _reflowMode ? _auroraTeal : Colors.white,
                   ),
                 ),
-                // Adobe Headphones (Read Aloud) icon
+                // Read Aloud Headphones icon
                 AnimatedBuilder(
                   animation: _playback,
                   builder: (context, _) => IconButton(
@@ -2333,9 +2566,11 @@ class _ReaderPageState extends State<ReaderPage> {
                         ? null
                         : _playback.toggle,
                     icon: Icon(
-                      Icons.headphones_outlined,
+                      _playback.wantedPlaying
+                          ? Icons.graphic_eq_rounded
+                          : Icons.headphones_outlined,
                       color: _playback.wantedPlaying
-                          ? const Color(0xff4da3ff)
+                          ? _auroraTeal
                           : Colors.white,
                     ),
                   ),
@@ -2347,7 +2582,7 @@ class _ReaderPageState extends State<ReaderPage> {
                   onPressed: () => setState(() => _searching = !_searching),
                   icon: Icon(
                     Icons.search_rounded,
-                    color: _searching ? const Color(0xff4da3ff) : Colors.white,
+                    color: _searching ? _auroraTeal : Colors.white,
                   ),
                 ),
                 _darkPageButton(),
@@ -2360,24 +2595,25 @@ class _ReaderPageState extends State<ReaderPage> {
                       : () => _setFullscreen(true),
                   icon: const Icon(Icons.fullscreen, color: Colors.white),
                 ),
-                // Adobe-style rounded square ⋮ overflow button
+                // Sleek rounded square ⋮ overflow button with subtle teal border
                 Padding(
                   padding: const EdgeInsets.only(right: 8, left: 2),
                   child: InkWell(
                     key: const Key('reader-menu'),
-                    borderRadius: BorderRadius.circular(10),
+                    borderRadius: BorderRadius.circular(11),
                     onTap: _showAdobeMoreSheet,
                     child: Container(
                       width: 38,
                       height: 38,
                       decoration: BoxDecoration(
-                        color: _adobeButtonBg,
-                        borderRadius: BorderRadius.circular(10),
+                        color: _obsidianCardBg,
+                        borderRadius: BorderRadius.circular(11),
+                        border: Border.all(color: Colors.white12),
                       ),
                       child: const Icon(
                         Icons.more_vert_rounded,
                         color: Colors.white,
-                        size: 22,
+                        size: 21,
                       ),
                     ),
                   ),
@@ -2482,7 +2718,7 @@ class _ReaderPageState extends State<ReaderPage> {
       final start = word?.start ?? -1;
       final end = word?.end ?? -1;
       return Container(
-        color: _adobeSheetBg,
+        color: _obsidianSheetBg,
         child: SingleChildScrollView(
           key: const Key('now-reading-panel'),
           padding: const EdgeInsets.all(16),
@@ -2495,10 +2731,10 @@ class _ReaderPageState extends State<ReaderPage> {
                   const Text(
                     'NOW READING',
                     style: TextStyle(
-                      color: Colors.white54,
+                      color: _auroraTeal,
                       fontSize: 11,
-                      letterSpacing: 0.8,
-                      fontWeight: FontWeight.w600,
+                      letterSpacing: 0.9,
+                      fontWeight: FontWeight.w700,
                     ),
                   ),
                   Text(
@@ -2517,7 +2753,7 @@ class _ReaderPageState extends State<ReaderPage> {
                           TextSpan(
                             text: text.substring(start, end),
                             style: const TextStyle(
-                              backgroundColor: Color(0xffffd65c),
+                              backgroundColor: _auroraTeal,
                               color: Colors.black,
                               fontWeight: FontWeight.bold,
                             ),
@@ -2554,276 +2790,318 @@ class _ReaderPageState extends State<ReaderPage> {
     return h > 0 ? '$h:$mm:$ss' : '$mm:$ss';
   }
 
-  /// Sleek Adobe Acrobat Reader Android-style dark bottom bar (Screenshots 2 & 3),
-  /// with OpenReader-relevant tools (Read aloud, Read page, Transcript, Pages, More tools)
-  /// and a compact audio scrubber row when narration is active.
+  /// Magic UI-inspired Floating Obsidian Glass Dock + Animated BorderBeam Glow
+  /// + Live Karaoke Mini-Caption Pill when Read Aloud is active.
   Widget _controls() => AnimatedBuilder(
-    animation: _playback,
+    animation: Listenable.merge([_playback, _beamController]),
     builder: (context, _) {
       final totalPassages = _playback.plan.length;
       final currentOrd = (_scrubPassage?.round() ?? _playback.currentOrdinal)
           .clamp(0, math.max(0, totalPassages - 1));
       final totalDurationMs = _playback.durationMs;
+      final isPlaying = _playback.wantedPlaying;
       final showAudioScrubber =
-          _playback.wantedPlaying ||
+          isPlaying ||
           _playback.preparing ||
           _playback.error != null ||
           _scrubPassage != null;
 
-      return Material(
+      return Container(
         key: const Key('playback-bar'),
-        color: _adobeBarBg,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (_playback.preparing)
-              const LinearProgressIndicator(
-                minHeight: 2,
-                color: Color(0xff4da3ff),
-                backgroundColor: Colors.white12,
-              )
-            else
-              Container(height: 1, color: Colors.white12),
+        color: _obsidianBarBg,
+        padding: const EdgeInsets.fromLTRB(10, 6, 10, 8),
+        child: CustomPaint(
+          foregroundPainter: isPlaying
+              ? _BorderBeamPainter(
+                  progress: _beamController.value,
+                  radius: 22,
+                  colorFrom: _auroraTeal,
+                  colorTo: _auroraCyan,
+                )
+              : null,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [Color(0xff17202e), Color(0xff101620)],
+              ),
+              borderRadius: BorderRadius.circular(22),
+              border: Border.all(
+                color: isPlaying
+                    ? _auroraTeal.withValues(alpha: 0.35)
+                    : Colors.white12,
+              ),
+              boxShadow: const [
+                BoxShadow(
+                  color: Colors.black54,
+                  blurRadius: 12,
+                  offset: Offset(0, 4),
+                ),
+              ],
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (_playback.preparing)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(4),
+                      child: const LinearProgressIndicator(
+                        minHeight: 2.5,
+                        color: _auroraTeal,
+                        backgroundColor: Colors.white12,
+                      ),
+                    ),
+                  ),
 
-            // Hidden/compact status key preserved for test compatibility and error display
-            if (showAudioScrubber)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(12, 6, 12, 0),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Row(
+                // Live Karaoke Mini-Caption Pill when playing & full drawer is closed
+                if (isPlaying && !_transcriptVisible)
+                  _buildLiveKaraokeMiniPill(),
+
+                if (showAudioScrubber)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(4, 2, 4, 2),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
                       children: [
-                        IconButton(
-                          visualDensity: VisualDensity.compact,
-                          padding: EdgeInsets.zero,
-                          constraints: const BoxConstraints(
-                            minWidth: 32,
-                            minHeight: 28,
-                          ),
-                          tooltip: 'Previous passage',
-                          onPressed:
-                              !_playback.connected ||
-                                  _playback.preparing ||
-                                  _switchingSource
-                              ? null
-                              : () {
-                                  final previous = _playback.plan
-                                      .where(
-                                        (segment) =>
-                                            integer(segment['ordinal']) <
-                                            _playback.currentOrdinal,
-                                      )
-                                      .lastOrNull;
-                                  if (previous != null) {
-                                    unawaited(
-                                      _playback.startAt(
-                                        integer(previous['ordinal']),
-                                      ),
-                                    );
-                                  }
-                                },
-                          icon: const Icon(
-                            Icons.skip_previous_rounded,
-                            color: Colors.white,
-                            size: 20,
-                          ),
-                        ),
-                        Text(
-                          totalDurationMs > 0
-                              ? _formatMs(_playback.currentMs)
-                              : '${currentOrd + 1}',
-                          style: const TextStyle(
-                            fontSize: 11,
-                            color: Colors.white70,
-                          ),
-                        ),
-                        Expanded(
-                          child: SliderTheme(
-                            data: SliderTheme.of(context).copyWith(
-                              trackHeight: 2.0,
-                              activeTrackColor: const Color(0xff4da3ff),
-                              inactiveTrackColor: Colors.white24,
-                              thumbColor: const Color(0xff4da3ff),
-                              thumbShape: const RoundSliderThumbShape(
-                                enabledThumbRadius: 5,
+                        Row(
+                          children: [
+                            IconButton(
+                              visualDensity: VisualDensity.compact,
+                              padding: EdgeInsets.zero,
+                              constraints: const BoxConstraints(
+                                minWidth: 30,
+                                minHeight: 26,
                               ),
-                              overlayShape: const RoundSliderOverlayShape(
-                                overlayRadius: 12,
-                              ),
-                            ),
-                            child: Slider(
-                              min: 0,
-                              max: math.max(1, totalPassages - 1).toDouble(),
-                              value: currentOrd
-                                  .clamp(0, math.max(1, totalPassages - 1))
-                                  .toDouble(),
-                              onChanged:
+                              tooltip: 'Previous passage',
+                              onPressed:
                                   !_playback.connected ||
                                       _playback.preparing ||
-                                      _switchingSource ||
-                                      totalPassages <= 1
+                                      _switchingSource
                                   ? null
-                                  : (value) =>
-                                        setState(() => _scrubPassage = value),
-                              onChangeEnd: (value) {
-                                final targetOrd = value.round();
-                                setState(() => _scrubPassage = null);
-                                if (_playback.wantedPlaying) {
-                                  unawaited(_playback.startAt(targetOrd));
-                                } else {
-                                  unawaited(_playback.selectAt(targetOrd));
-                                }
-                              },
-                            ),
-                          ),
-                        ),
-                        Text(
-                          totalDurationMs > 0
-                              ? _formatMs(totalDurationMs)
-                              : '$totalPassages',
-                          style: const TextStyle(
-                            fontSize: 11,
-                            color: Colors.white70,
-                          ),
-                        ),
-                        IconButton(
-                          visualDensity: VisualDensity.compact,
-                          padding: EdgeInsets.zero,
-                          constraints: const BoxConstraints(
-                            minWidth: 32,
-                            minHeight: 28,
-                          ),
-                          tooltip: 'Next passage',
-                          onPressed:
-                              !_playback.connected ||
-                                  _playback.preparing ||
-                                  _switchingSource
-                              ? null
-                              : () {
-                                  final next = _playback.plan
-                                      .where(
-                                        (segment) =>
-                                            integer(segment['ordinal']) >
-                                            _playback.currentOrdinal,
-                                      )
-                                      .firstOrNull;
-                                  if (next != null) {
-                                    unawaited(
-                                      _playback.startAt(
-                                        integer(next['ordinal']),
-                                      ),
-                                    );
-                                  }
-                                },
-                          icon: const Icon(
-                            Icons.skip_next_rounded,
-                            color: Colors.white,
-                            size: 20,
-                          ),
-                        ),
-                        const SizedBox(width: 4),
-                        InkWell(
-                          borderRadius: BorderRadius.circular(12),
-                          onTap: _showVoiceAndSpeedSheet,
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 8,
-                              vertical: 3,
-                            ),
-                            decoration: BoxDecoration(
-                              color: _adobeButtonBg,
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            child: Text(
-                              '${_playback.speed}x',
-                              style: const TextStyle(
+                                  : () {
+                                      final previous = _playback.plan
+                                          .where(
+                                            (segment) =>
+                                                integer(segment['ordinal']) <
+                                                _playback.currentOrdinal,
+                                          )
+                                          .lastOrNull;
+                                      if (previous != null) {
+                                        unawaited(
+                                          _playback.startAt(
+                                            integer(previous['ordinal']),
+                                          ),
+                                        );
+                                      }
+                                    },
+                              icon: const Icon(
+                                Icons.skip_previous_rounded,
                                 color: Colors.white,
-                                fontSize: 11,
-                                fontWeight: FontWeight.w600,
+                                size: 20,
                               ),
                             ),
+                            Text(
+                              totalDurationMs > 0
+                                  ? _formatMs(_playback.currentMs)
+                                  : '${currentOrd + 1}',
+                              style: const TextStyle(
+                                fontSize: 11,
+                                color: Colors.white70,
+                              ),
+                            ),
+                            Expanded(
+                              child: SliderTheme(
+                                data: SliderTheme.of(context).copyWith(
+                                  trackHeight: 2.5,
+                                  activeTrackColor: _auroraTeal,
+                                  inactiveTrackColor: Colors.white24,
+                                  thumbColor: _auroraCyan,
+                                  thumbShape: const RoundSliderThumbShape(
+                                    enabledThumbRadius: 5.5,
+                                  ),
+                                  overlayShape: const RoundSliderOverlayShape(
+                                    overlayRadius: 12,
+                                  ),
+                                ),
+                                child: Slider(
+                                  min: 0,
+                                  max: math.max(1, totalPassages - 1).toDouble(),
+                                  value: currentOrd
+                                      .clamp(0, math.max(1, totalPassages - 1))
+                                      .toDouble(),
+                                  onChanged:
+                                      !_playback.connected ||
+                                          _playback.preparing ||
+                                          _switchingSource ||
+                                          totalPassages <= 1
+                                      ? null
+                                      : (value) => setState(
+                                          () => _scrubPassage = value,
+                                        ),
+                                  onChangeEnd: (value) {
+                                    final targetOrd = value.round();
+                                    setState(() => _scrubPassage = null);
+                                    if (_playback.wantedPlaying) {
+                                      unawaited(_playback.startAt(targetOrd));
+                                    } else {
+                                      unawaited(_playback.selectAt(targetOrd));
+                                    }
+                                  },
+                                ),
+                              ),
+                            ),
+                            Text(
+                              totalDurationMs > 0
+                                  ? _formatMs(totalDurationMs)
+                                  : '$totalPassages',
+                              style: const TextStyle(
+                                fontSize: 11,
+                                color: Colors.white70,
+                              ),
+                            ),
+                            IconButton(
+                              visualDensity: VisualDensity.compact,
+                              padding: EdgeInsets.zero,
+                              constraints: const BoxConstraints(
+                                minWidth: 30,
+                                minHeight: 26,
+                              ),
+                              tooltip: 'Next passage',
+                              onPressed:
+                                  !_playback.connected ||
+                                      _playback.preparing ||
+                                      _switchingSource
+                                  ? null
+                                  : () {
+                                      final next = _playback.plan
+                                          .where(
+                                            (segment) =>
+                                                integer(segment['ordinal']) >
+                                                _playback.currentOrdinal,
+                                          )
+                                          .firstOrNull;
+                                      if (next != null) {
+                                        unawaited(
+                                          _playback.startAt(
+                                            integer(next['ordinal']),
+                                          ),
+                                        );
+                                      }
+                                    },
+                              icon: const Icon(
+                                Icons.skip_next_rounded,
+                                color: Colors.white,
+                                size: 20,
+                              ),
+                            ),
+                            const SizedBox(width: 4),
+                            InkWell(
+                              borderRadius: BorderRadius.circular(12),
+                              onTap: _showVoiceAndSpeedSheet,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                  vertical: 3,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: _obsidianCardBg,
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(
+                                    color: _auroraTeal.withValues(alpha: 0.4),
+                                  ),
+                                ),
+                                child: Text(
+                                  '${_playback.speed}x',
+                                  style: const TextStyle(
+                                    color: _auroraTeal,
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        Text(
+                          _switchingSource
+                              ? 'Switching voice source...'
+                              : _playback.status,
+                          key: const Key('playback-status'),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 10.5,
+                            color: _playback.error != null
+                                ? Colors.redAccent
+                                : Colors.white54,
                           ),
                         ),
                       ],
                     ),
-                    Text(
-                      _switchingSource
-                          ? 'Switching voice source...'
-                          : _playback.status,
+                  )
+                else
+                  Offstage(
+                    offstage: true,
+                    child: Text(
+                      _playback.status,
                       key: const Key('playback-status'),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 11,
-                        color: _playback.error != null
-                            ? Colors.redAccent
-                            : Colors.white54,
-                      ),
+                    ),
+                  ),
+
+                // Main 5-item Magic UI Capsule Dock
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceAround,
+                  children: [
+                    _adobeBottomBarItem(
+                      itemKey: const Key('play-pause'),
+                      icon: isPlaying
+                          ? Icons.pause_circle_filled_rounded
+                          : Icons.headphones_rounded,
+                      label: _playback.error != null
+                          ? 'Retry'
+                          : isPlaying
+                          ? 'Pause'
+                          : 'Read aloud',
+                      active: isPlaying,
+                      enabled:
+                          _playback.connected &&
+                          !_playback.preparing &&
+                          !_switchingSource,
+                      onTap: _playback.toggle,
+                    ),
+                    _adobeBottomBarItem(
+                      icon: Icons.play_lesson_outlined,
+                      label: 'Read page',
+                      enabled: _playback.connected && !_playback.preparing,
+                      onTap: () => _readPage(_page),
+                    ),
+                    _adobeBottomBarItem(
+                      itemKey: const Key('toggle-transcript'),
+                      icon: Icons.subtitles_outlined,
+                      label: 'Transcript',
+                      active: _transcriptVisible,
+                      onTap: () =>
+                          setState(() => _transcript = !_transcriptVisible),
+                    ),
+                    _adobeBottomBarItem(
+                      icon: Icons.grid_view_rounded,
+                      label: 'Pages',
+                      onTap: () => _showNavigationSheet(initialTab: 1),
+                    ),
+                    _adobeBottomBarItem(
+                      icon: Icons.more_horiz_rounded,
+                      label: 'More tools',
+                      onTap: _showAdobeMoreSheet,
                     ),
                   ],
                 ),
-              )
-            else
-              Offstage(
-                offstage: true,
-                child: Text(
-                  _playback.status,
-                  key: const Key('playback-status'),
-                ),
-              ),
-
-            // Main Adobe Acrobat Reader Android-style 5-item bottom bar
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceAround,
-                children: [
-                  _adobeBottomBarItem(
-                    itemKey: const Key('play-pause'),
-                    icon: _playback.wantedPlaying
-                        ? Icons.pause_circle_outline_rounded
-                        : Icons.headphones_outlined,
-                    label: _playback.error != null
-                        ? 'Retry'
-                        : _playback.wantedPlaying
-                        ? 'Pause'
-                        : 'Read aloud',
-                    active: _playback.wantedPlaying,
-                    enabled:
-                        _playback.connected &&
-                        !_playback.preparing &&
-                        !_switchingSource,
-                    onTap: _playback.toggle,
-                  ),
-                  _adobeBottomBarItem(
-                    icon: Icons.play_lesson_outlined,
-                    label: 'Read page',
-                    enabled: _playback.connected && !_playback.preparing,
-                    onTap: () => _readPage(_page),
-                  ),
-                  _adobeBottomBarItem(
-                    itemKey: const Key('toggle-transcript'),
-                    icon: Icons.subtitles_outlined,
-                    label: 'Transcript',
-                    active: _transcriptVisible,
-                    onTap: () =>
-                        setState(() => _transcript = !_transcriptVisible),
-                  ),
-                  _adobeBottomBarItem(
-                    icon: Icons.grid_view_rounded,
-                    label: 'Pages',
-                    onTap: () => _showNavigationSheet(initialTab: 1),
-                  ),
-                  _adobeBottomBarItem(
-                    icon: Icons.more_horiz_rounded,
-                    label: 'More tools',
-                    onTap: _showAdobeMoreSheet,
-                  ),
-                ],
-              ),
+              ],
             ),
-          ],
+          ),
         ),
       );
     },
@@ -2840,20 +3118,28 @@ class _ReaderPageState extends State<ReaderPage> {
     final color = !enabled
         ? Colors.white38
         : active
-        ? const Color(0xff4da3ff)
+        ? _auroraTeal
         : Colors.white;
     return Expanded(
       child: InkWell(
         key: itemKey,
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(14),
         onTap: enabled ? onTap : null,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 4),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          margin: const EdgeInsets.symmetric(horizontal: 2),
+          padding: const EdgeInsets.symmetric(vertical: 5),
+          decoration: BoxDecoration(
+            color: active
+                ? _auroraTeal.withValues(alpha: 0.14)
+                : Colors.transparent,
+            borderRadius: BorderRadius.circular(14),
+          ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(icon, color: color, size: 24),
-              const SizedBox(height: 4),
+              Icon(icon, color: color, size: 22),
+              const SizedBox(height: 3),
               Text(
                 label,
                 maxLines: 1,
@@ -2861,7 +3147,7 @@ class _ReaderPageState extends State<ReaderPage> {
                 style: TextStyle(
                   color: color,
                   fontSize: 11,
-                  fontWeight: active ? FontWeight.w600 : FontWeight.w400,
+                  fontWeight: active ? FontWeight.w700 : FontWeight.w400,
                 ),
               ),
             ],
@@ -2872,6 +3158,51 @@ class _ReaderPageState extends State<ReaderPage> {
   }
 }
 
+/// Magic UI `BorderBeam` port for Flutter: paints a smooth traveling aurora
+/// gradient beam around the rounded dock perimeter while audio is playing.
+class _BorderBeamPainter extends CustomPainter {
+  const _BorderBeamPainter({
+    required this.progress,
+    required this.radius,
+    required this.colorFrom,
+    required this.colorTo,
+  });
+  final double progress;
+  final double radius;
+  final Color colorFrom;
+  final Color colorTo;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rect = Offset.zero & size;
+    final rrect = RRect.fromRectAndRadius(
+      rect.deflate(0.75),
+      Radius.circular(radius),
+    );
+    final angle = progress * 2 * math.pi;
+    final paint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.8
+      ..shader = SweepGradient(
+        colors: [
+          Colors.transparent,
+          colorFrom.withValues(alpha: 0.85),
+          colorTo,
+          Colors.transparent,
+        ],
+        stops: const [0.0, 0.15, 0.28, 0.45],
+        transform: GradientRotation(angle),
+      ).createShader(rect);
+    canvas.drawRRect(rrect, paint);
+  }
+
+  @override
+  bool shouldRepaint(_BorderBeamPainter oldDelegate) =>
+      oldDelegate.progress != progress;
+}
+
+/// Upgraded Word Highlight Painter: draws a smooth rounded capsule with soft
+/// outer glow and crisp bottom accent line instead of a flat rectangle.
 class _WordPainter extends CustomPainter {
   _WordPainter(this.page, this.highlight) : super(repaint: highlight);
   final PdfPage page;
@@ -2880,17 +3211,30 @@ class _WordPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final value = highlight.value;
     if (value == null || value.page != page.pageNumber) return;
-    final paint = Paint()
-      ..color = const Color(0xffffcc32).withValues(alpha: .48);
+    final glowPaint = Paint()
+      ..color = const Color(0xff2dd4bf).withValues(alpha: 0.24)
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4);
+    final fillPaint = Paint()
+      ..color = const Color(0xffffd84d).withValues(alpha: 0.46);
+    final underlinePaint = Paint()
+      ..color = const Color(0xff14b8a6).withValues(alpha: 0.85)
+      ..strokeWidth = 1.8
+      ..style = PaintingStyle.stroke;
+
     for (final rect in value.rects) {
-      canvas.drawRect(
-        Rect.fromLTRB(
-          rect.left / page.width * size.width,
-          (page.height - rect.top) / page.height * size.height,
-          rect.right / page.width * size.width,
-          (page.height - rect.bottom) / page.height * size.height,
-        ).inflate(1),
-        paint,
+      final box = Rect.fromLTRB(
+        rect.left / page.width * size.width,
+        (page.height - rect.top) / page.height * size.height,
+        rect.right / page.width * size.width,
+        (page.height - rect.bottom) / page.height * size.height,
+      ).inflate(1.5);
+      final rrect = RRect.fromRectAndRadius(box, const Radius.circular(3.5));
+      canvas.drawRRect(rrect.inflate(1.5), glowPaint);
+      canvas.drawRRect(rrect, fillPaint);
+      canvas.drawLine(
+        Offset(box.left + 1, box.bottom),
+        Offset(box.right - 1, box.bottom),
+        underlinePaint,
       );
     }
   }
