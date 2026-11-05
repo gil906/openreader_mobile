@@ -1,14 +1,18 @@
 package com.homelab.openreader_native
 
-import android.os.Build
-import android.os.Bundle
+import android.content.ContentValues
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.os.Environment
+import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.util.Log
 import android.view.View
 import android.view.WindowInsets
 import android.view.WindowInsetsController
+import androidx.core.content.FileProvider
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -43,37 +47,145 @@ class MainActivity : FlutterActivity() {
             "com.homelab.openreader_native/reader",
         )
         readerChannel!!.setMethodCallHandler { call, result ->
-            if (call.method == "pendingPdfs") {
-                result.success(mapOf("pdfs" to pendingPdfs.values.toList(), "errors" to pendingErrors.toList()))
-                pendingErrors.clear()
-                return@setMethodCallHandler
-            }
-            if (call.method == "finishPdfImport") {
-                val id = call.argument<String>("id")
-                val imported = pendingPdfs.remove(id)
-                imported?.get("path")?.let { path ->
-                    if (!File(path).delete()) Log.w("OpenReader", "Could not remove temporary PDF import.")
+            when (call.method) {
+                "pendingPdfs" -> {
+                    result.success(mapOf("pdfs" to pendingPdfs.values.toList(), "errors" to pendingErrors.toList()))
+                    pendingErrors.clear()
                 }
-                result.success(null)
-                return@setMethodCallHandler
+                "finishPdfImport" -> {
+                    val id = call.argument<String>("id")
+                    val imported = pendingPdfs.remove(id)
+                    imported?.get("path")?.let { path ->
+                        if (!File(path).delete()) Log.w("OpenReader", "Could not remove temporary PDF import.")
+                    }
+                    result.success(null)
+                }
+                "saveToDownloads" -> {
+                    val sourcePath = call.argument<String>("path")
+                    val rawName = call.argument<String>("fileName") ?: "Document.pdf"
+                    val mimeType = call.argument<String>("mimeType") ?: "application/pdf"
+                    if (sourcePath.isNullOrBlank()) {
+                        result.error("INVALID_ARGUMENT", "Missing source file path.", null)
+                        return@setMethodCallHandler
+                    }
+                    pdfImports.execute {
+                        try {
+                            val savedLocation = saveFileToDownloads(File(sourcePath), sanitizeFileName(rawName), mimeType)
+                            runOnUiThread { result.success(savedLocation) }
+                        } catch (error: Exception) {
+                            Log.w("OpenReader", "saveToDownloads failed.", error)
+                            runOnUiThread { result.error("SAVE_FAILED", error.message ?: "Could not save file.", null) }
+                        }
+                    }
+                }
+                "shareFile" -> {
+                    val sourcePath = call.argument<String>("path")
+                    val rawName = call.argument<String>("fileName") ?: "Document.pdf"
+                    val mimeType = call.argument<String>("mimeType") ?: "application/pdf"
+                    val title = call.argument<String>("title") ?: rawName
+                    if (sourcePath.isNullOrBlank()) {
+                        result.error("INVALID_ARGUMENT", "Missing source file path.", null)
+                        return@setMethodCallHandler
+                    }
+                    pdfImports.execute {
+                        try {
+                            val cleanName = sanitizeFileName(rawName)
+                            val shareDir = File(cacheDir, "shared").apply { mkdirs() }
+                            val targetFile = File(shareDir, cleanName)
+                            val sourceFile = File(sourcePath)
+                            if (sourceFile.canonicalPath != targetFile.canonicalPath) {
+                                sourceFile.copyTo(targetFile, overwrite = true)
+                            }
+                            val uri = FileProvider.getUriForFile(
+                                this@MainActivity,
+                                "$packageName.fileprovider",
+                                targetFile,
+                            )
+                            runOnUiThread {
+                                val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                                    type = mimeType
+                                    putExtra(Intent.EXTRA_STREAM, uri)
+                                    putExtra(Intent.EXTRA_TITLE, title)
+                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                }
+                                startActivity(Intent.createChooser(sendIntent, title))
+                                result.success(true)
+                            }
+                        } catch (error: Exception) {
+                            Log.w("OpenReader", "shareFile failed.", error)
+                            runOnUiThread { result.error("SHARE_FAILED", error.message ?: "Could not share file.", null) }
+                        }
+                    }
+                }
+                "shareText" -> {
+                    val text = call.argument<String>("text") ?: ""
+                    val title = call.argument<String>("title") ?: "Share passage"
+                    if (text.isBlank()) {
+                        result.error("INVALID_ARGUMENT", "Nothing to share.", null)
+                        return@setMethodCallHandler
+                    }
+                    val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(Intent.EXTRA_SUBJECT, title)
+                        putExtra(Intent.EXTRA_TEXT, text)
+                    }
+                    startActivity(Intent.createChooser(sendIntent, title))
+                    result.success(true)
+                }
+                "setFullscreen" -> {
+                    val enabled = call.argument<Boolean>("enabled")
+                    if (enabled == null) {
+                        result.error("INVALID_ARGUMENT", "Fullscreen requires enabled=true or false.", null)
+                        return@setMethodCallHandler
+                    }
+                    val previous = readerFullscreen
+                    readerFullscreen = enabled
+                    if (applyReaderSystemBars()) {
+                        result.success(null)
+                    } else {
+                        readerFullscreen = previous
+                        result.error("FULLSCREEN_UNAVAILABLE", "System bars controller is unavailable.", null)
+                    }
+                }
+                else -> result.notImplemented()
             }
-            if (call.method != "setFullscreen") {
-                result.notImplemented()
-                return@setMethodCallHandler
+        }
+    }
+
+    private fun sanitizeFileName(raw: String): String {
+        val cleaned = raw.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim()
+        return if (cleaned.isEmpty()) "Document.pdf" else cleaned
+    }
+
+    private fun saveFileToDownloads(source: File, fileName: String, mimeType: String): String {
+        if (!source.exists()) throw IOException("Source file does not exist.")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val values = ContentValues().apply {
+                put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+                put(MediaStore.Downloads.MIME_TYPE, mimeType)
+                put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                put(MediaStore.Downloads.IS_PENDING, 1)
             }
-            val enabled = call.argument<Boolean>("enabled")
-            if (enabled == null) {
-                result.error("INVALID_ARGUMENT", "Fullscreen requires enabled=true or false.", null)
-                return@setMethodCallHandler
+            val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                ?: throw IOException("MediaStore refused to create download entry.")
+            try {
+                contentResolver.openOutputStream(uri)?.use { out ->
+                    source.inputStream().use { input -> input.copyTo(out) }
+                } ?: throw IOException("Could not open Download output stream.")
+                val done = ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }
+                contentResolver.update(uri, done, null, null)
+                return "Downloads/$fileName"
+            } catch (e: Exception) {
+                contentResolver.delete(uri, null, null)
+                throw e
             }
-            val previous = readerFullscreen
-            readerFullscreen = enabled
-            if (applyReaderSystemBars()) {
-                result.success(null)
-            } else {
-                readerFullscreen = previous
-                result.error("FULLSCREEN_UNAVAILABLE", "System bars controller is unavailable.", null)
-            }
+        } else {
+            @Suppress("DEPRECATION")
+            val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+            dir.mkdirs()
+            val out = File(dir, fileName)
+            source.copyTo(out, overwrite = true)
+            return out.absolutePath
         }
     }
 

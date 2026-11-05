@@ -1,3 +1,5 @@
+import 'dart:io';
+import 'package:path_provider/path_provider.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
@@ -1554,6 +1556,25 @@ class _ReaderPageState extends State<ReaderPage>
                   },
                 ),
                 _adobeMenuTile(
+                  icon: Icons.download_rounded,
+                  title: 'Save PDF to device (Downloads)',
+                  enabled: _pdfBytes != null,
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    unawaited(_savePdfToDeviceDownloads());
+                  },
+                ),
+                _adobeMenuTile(
+                  icon: Icons.share_outlined,
+                  title: 'Share PDF / Page text...',
+                  enabled: _pdfBytes != null,
+                  trailingChevron: true,
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    unawaited(_showShareAndSaveSheet());
+                  },
+                ),
+                _adobeMenuTile(
                   tileKey: const Key('save-offline'),
                   icon: Icons.offline_pin_outlined,
                   title: _savingOffline
@@ -1625,6 +1646,248 @@ class _ReaderPageState extends State<ReaderPage>
         : null,
     onTap: enabled ? onTap : null,
   );
+
+
+  String get _cleanPdfFileName {
+    final raw = '${widget.document['name'] ?? 'Document.pdf'}'.trim();
+    return raw.toLowerCase().endsWith('.pdf') ? raw : '$raw.pdf';
+  }
+
+  String get _cleanMp3FileName {
+    final base = _cleanPdfFileName.replaceAll(RegExp(r'\.pdf$', caseSensitive: false), '');
+    return '$base.mp3';
+  }
+
+  Future<File> _materializePdfTempFile() async {
+    if (_savedDocument != null && await _savedDocument!.pdf.exists()) {
+      return _savedDocument!.pdf;
+    }
+    if (_pdfBytes == null) {
+      throw const ReaderException('PDF is still loading.');
+    }
+    final dir = await getTemporaryDirectory();
+    final f = File('${dir.path}/$_cleanPdfFileName');
+    await f.writeAsBytes(_pdfBytes!, flush: true);
+    return f;
+  }
+
+  Future<File?> _findPreparedMp3File() async {
+    if (_savedDocument == null) return null;
+    try {
+      final rec = await ServerNarration(_savedDocument!).load();
+      return rec?.audio;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _savePdfToDeviceDownloads() async {
+    try {
+      final file = await _materializePdfTempFile();
+      final savedAt = await _window.invokeMethod<String>('saveToDownloads', {
+        'path': file.path,
+        'fileName': _cleanPdfFileName,
+        'mimeType': 'application/pdf',
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Saved to device: ${savedAt ?? _cleanPdfFileName}')),
+        );
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not save PDF to device: $error')),
+        );
+      }
+    }
+  }
+
+  Future<void> _sharePdfFile() async {
+    try {
+      final file = await _materializePdfTempFile();
+      await _window.invokeMethod<bool>('shareFile', {
+        'path': file.path,
+        'fileName': _cleanPdfFileName,
+        'mimeType': 'application/pdf',
+        'title': 'Share $_cleanPdfFileName',
+      });
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not share PDF: $error')),
+        );
+      }
+    }
+  }
+
+  Future<void> _saveMp3ToDownloads() async {
+    try {
+      final mp3 = await _findPreparedMp3File();
+      if (mp3 == null) return;
+      final savedAt = await _window.invokeMethod<String>('saveToDownloads', {
+        'path': mp3.path,
+        'fileName': _cleanMp3FileName,
+        'mimeType': 'audio/mpeg',
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Saved MP3 to device: ${savedAt ?? _cleanMp3FileName}')),
+        );
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not save MP3 to device: $error')),
+        );
+      }
+    }
+  }
+
+  Future<void> _shareMp3File() async {
+    try {
+      final mp3 = await _findPreparedMp3File();
+      if (mp3 == null) return;
+      await _window.invokeMethod<bool>('shareFile', {
+        'path': mp3.path,
+        'fileName': _cleanMp3FileName,
+        'mimeType': 'audio/mpeg',
+        'title': 'Share $_cleanMp3FileName',
+      });
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not share MP3: $error')),
+        );
+      }
+    }
+  }
+
+  Future<void> _shareCurrentPageText() async {
+    final segs = _playback.plan
+        .where((s) => integer(object(s['locator'])['page'], 1) == _page)
+        .map((s) => '${s['text'] ?? ''}'.trim())
+        .where((t) => t.isNotEmpty)
+        .toList();
+    final pageText = segs.join('\n\n');
+    if (pageText.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('No readable text on this page to share.')),
+        );
+      }
+      return;
+    }
+    await _window.invokeMethod<bool>('shareText', {
+      'text': '${widget.document['name']} (Page $_page):\n\n$pageText',
+      'title': 'Share Page $_page Text',
+    });
+  }
+
+  Future<void> _showShareAndSaveSheet() async {
+    final mp3 = await _findPreparedMp3File();
+    if (!mounted) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: _obsidianSheetBg,
+      useSafeArea: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(26)),
+      ),
+      builder: (sheetContext) => Padding(
+        padding: const EdgeInsets.only(top: 10, bottom: 20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 42,
+              height: 4,
+              decoration: BoxDecoration(
+                color: Colors.white38,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 14, 20, 10),
+              child: Row(
+                children: [
+                  const Icon(Icons.share_outlined, color: _auroraTeal, size: 22),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'Save to Device & Share',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const Divider(height: 1, color: Colors.white12),
+            _adobeMenuTile(
+              icon: Icons.download_rounded,
+              title: 'Save PDF to device (Downloads folder)',
+              enabled: _pdfBytes != null,
+              onTap: () {
+                Navigator.pop(sheetContext);
+                unawaited(_savePdfToDeviceDownloads());
+              },
+            ),
+            _adobeMenuTile(
+              icon: Icons.ios_share_rounded,
+              title: 'Share PDF file...',
+              enabled: _pdfBytes != null,
+              onTap: () {
+                Navigator.pop(sheetContext);
+                unawaited(_sharePdfFile());
+              },
+            ),
+            _adobeMenuTile(
+              icon: Icons.offline_pin_outlined,
+              title: _savingOffline
+                  ? 'Saving to OpenReader Offline Library...'
+                  : 'Save in OpenReader Offline Library',
+              enabled: !_savingOffline && _pdfBytes != null && _playback.connected,
+              onTap: () {
+                Navigator.pop(sheetContext);
+                unawaited(_saveOffline(prepareAudio: false));
+              },
+            ),
+            _adobeMenuTile(
+              icon: Icons.notes_rounded,
+              title: 'Share Page $_page text...',
+              onTap: () {
+                Navigator.pop(sheetContext);
+                unawaited(_shareCurrentPageText());
+              },
+            ),
+            if (mp3 != null) ...[
+              const Divider(height: 8, color: Colors.white12),
+              _adobeMenuTile(
+                icon: Icons.audio_file_outlined,
+                title: 'Save full MP3 audiobook to Downloads',
+                onTap: () {
+                  Navigator.pop(sheetContext);
+                  unawaited(_saveMp3ToDownloads());
+                },
+              ),
+              _adobeMenuTile(
+                icon: Icons.share_rounded,
+                title: 'Share full MP3 audiobook...',
+                onTap: () {
+                  Navigator.pop(sheetContext);
+                  unawaited(_shareMp3File());
+                },
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
 
   Future<void> _saveOffline({bool prepareAudio = false}) async {
     if (_savingOffline || _pdfBytes == null || _playback.payload == null) {
@@ -2584,6 +2847,13 @@ class _ReaderPageState extends State<ReaderPage>
                     Icons.search_rounded,
                     color: _searching ? _auroraTeal : Colors.white,
                   ),
+                ),
+                // Share & Save to Device button (Adobe top bar style)
+                IconButton(
+                  key: const Key('share-save-button'),
+                  tooltip: 'Save to device or Share',
+                  onPressed: _pdfBytes != null ? _showShareAndSaveSheet : null,
+                  icon: const Icon(Icons.share_outlined, color: Colors.white),
                 ),
                 _darkPageButton(),
                 _sourceButton(),

@@ -1,3 +1,4 @@
+import 'package:flutter/services.dart';
 import 'dart:async';
 import 'dart:io';
 
@@ -36,6 +37,38 @@ class _OfflineLibraryPageState extends State<OfflineLibraryPage> {
   double? _progress;
   http.Client? _download;
   late String _voice;
+
+  static const _window = MethodChannel('com.homelab.openreader_native/reader');
+
+  Future<void> _saveToDownloads(OfflineDocument document) async {
+    try {
+      final raw = '${document.document['name'] ?? 'Document.pdf'}'.trim();
+      final name = raw.toLowerCase().endsWith('.pdf') ? raw : '$raw.pdf';
+      final saved = await _window.invokeMethod<String>('saveToDownloads', {
+        'path': document.pdf.path,
+        'fileName': name,
+        'mimeType': 'application/pdf',
+      });
+      _status('Saved to device: ${saved ?? name}');
+    } catch (error) {
+      _status('Could not save PDF to Downloads: $error', error: true);
+    }
+  }
+
+  Future<void> _shareDocument(OfflineDocument document) async {
+    try {
+      final raw = '${document.document['name'] ?? 'Document.pdf'}'.trim();
+      final name = raw.toLowerCase().endsWith('.pdf') ? raw : '$raw.pdf';
+      await _window.invokeMethod<bool>('shareFile', {
+        'path': document.pdf.path,
+        'fileName': name,
+        'mimeType': 'application/pdf',
+        'title': 'Share $name',
+      });
+    } catch (error) {
+      _status('Could not share PDF: $error', error: true);
+    }
+  }
 
   @override
   void initState() {
@@ -489,6 +522,8 @@ class _OfflineLibraryPageState extends State<OfflineLibraryPage> {
                   enabled: !_busy,
                   onSelected: (value) {
                     if (value == 'prepare') _prepareDocument(document);
+                    if (value == 'save-device') _saveToDownloads(document);
+                    if (value == 'share') _shareDocument(document);
                     if (value == 'audio') _removeNarration(document);
                     if (value == 'remove') _remove(document);
                   },
@@ -497,6 +532,14 @@ class _OfflineLibraryPageState extends State<OfflineLibraryPage> {
                       value: 'prepare',
                       enabled: buildOfflinePlan(document.payload).isNotEmpty,
                       child: const Text('Prepare entire PDF audio'),
+                    ),
+                    const PopupMenuItem(
+                      value: 'save-device',
+                      child: Text('Save PDF to device (Downloads)'),
+                    ),
+                    const PopupMenuItem(
+                      value: 'share',
+                      child: Text('Share PDF...'),
                     ),
                     const PopupMenuItem(
                       value: 'audio',

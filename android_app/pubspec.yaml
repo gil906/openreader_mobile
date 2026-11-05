@@ -1,7 +1,7 @@
 name: openreader_native
 description: Native PDF read-along client for your self-hosted OpenReader server.
 publish_to: none
-version: 1.4.0+13
+version: 1.4.1+14
 
 environment:
   sdk: ^3.13.7
