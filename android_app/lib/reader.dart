@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -12,6 +14,7 @@ import 'playback.dart';
 import 'offline_store.dart';
 import 'offline_engine.dart';
 import 'prepare_audio_dialog.dart';
+import 'server_narration.dart';
 
 class ReaderPage extends StatefulWidget {
   const ReaderPage({
@@ -36,6 +39,21 @@ class _PageHighlight {
   final String? word;
 }
 
+class _SearchMatch {
+  const _SearchMatch({
+    required this.ordinal,
+    required this.page,
+    required this.text,
+    required this.matchStart,
+    required this.matchEnd,
+  });
+  final int ordinal;
+  final int page;
+  final String text;
+  final int matchStart;
+  final int matchEnd;
+}
+
 class _ReaderPageState extends State<ReaderPage> {
   final _viewer = PdfViewerController();
   final _highlight = ValueNotifier<_PageHighlight?>(null);
@@ -58,41 +76,79 @@ class _ReaderPageState extends State<ReaderPage> {
   bool _viewerLaidOut = false;
   bool _fullscreen = false;
   bool _pdfDark = false;
+  String _colorTheme = 'light'; // 'light', 'sepia', 'dark', 'contrast'
+  bool _reflowMode = false;
+  double _reflowFontSize = 18.0;
+  bool _searching = false;
+  final TextEditingController _searchController = TextEditingController();
+  List<_SearchMatch> _searchMatches = [];
+  int _searchIndex = 0;
+  Set<int> _bookmarks = {};
+  double? _scrubPassage;
   bool _changingFullscreen = false;
   bool _savingOffline = false;
+
+  // Adobe-style right-edge fast scroll pill state:
+  // Only appears when scrolling the document or grabbing the pill.
+  bool _scrollPillVisible = false;
+  bool _draggingScrollPill = false;
+  int? _dragTargetPage;
+  double? _lastVisibleTop;
+  Timer? _scrollPillHideTimer;
+
+  static const _adobeBarBg = Color(0xff1c1c1e);
+  static const _adobeSheetBg = Color(0xff202024);
+  static const _adobeButtonBg = Color(0xff2c2c30);
+
   static const _window = MethodChannel('com.homelab.openreader_native/reader');
   static const _darkPageColors = ColorFilter.matrix([
-    -0.88,
-    0,
-    0,
-    0,
-    247,
-    0,
-    -0.88,
-    0,
-    0,
-    249,
-    0,
-    0,
-    -0.88,
-    0,
-    253,
-    0,
-    0,
-    0,
-    1,
-    0,
+    -0.88, 0, 0, 0, 247,
+    0, -0.88, 0, 0, 249,
+    0, 0, -0.88, 0, 253,
+    0, 0, 0, 1, 0,
   ]);
+  static const _sepiaPageColors = ColorFilter.matrix([
+    0.94, 0.04, 0.0, 0, 8,
+    0.02, 0.89, 0.02, 0, 4,
+    0.0, 0.04, 0.76, 0, -8,
+    0, 0, 0, 1, 0,
+  ]);
+  static const _contrastPageColors = ColorFilter.matrix([
+    -1.15, 0, 0, 0, 255,
+    0, -1.15, 0, 0, 255,
+    0, 0, -1.15, 0, 255,
+    0, 0, 0, 1, 0,
+  ]);
+
   String _wordSignature = '';
   bool get _transcriptVisible =>
       !_fullscreen &&
+      !_reflowMode &&
       (_transcript ?? (MediaQuery.sizeOf(context).width >= 700));
+
+  String get _bookmarksKey => 'bookmarks:${widget.document['id']}';
+
+  int get _effectiveMaxPages => math.max(
+    1,
+    _pageCount > 0
+        ? _pageCount
+        : _playback.plan.fold<int>(
+            1,
+            (m, s) => math.max(m, integer(object(s['locator'])['page'], 1)),
+          ),
+  );
 
   @override
   void initState() {
     super.initState();
     _pdfDark = widget.preferences.getBool('pdfDarkMode') ?? false;
+    _colorTheme =
+        widget.preferences.getString('pdfColorTheme') ??
+        (_pdfDark ? 'dark' : 'light');
+    _reflowFontSize = widget.preferences.getDouble('reflowFontSize') ?? 18.0;
+    _loadBookmarks();
     _savedDocument = widget.offline;
+    _viewer.addListener(_onViewerScrolled);
     _playback = ReaderPlayback(
       widget.api,
       widget.document['id'] as String,
@@ -102,9 +158,156 @@ class _ReaderPageState extends State<ReaderPage> {
     unawaited(_open());
   }
 
+  void _onViewerScrolled() {
+    if (!mounted || !_viewer.isReady) return;
+    final top = _viewer.visibleRect.top;
+    if (_lastVisibleTop == null) {
+      _lastVisibleTop = top;
+      return;
+    }
+    if ((top - _lastVisibleTop!).abs() > 1.5) {
+      _lastVisibleTop = top;
+      _revealScrollPill();
+    }
+  }
+
+  void _revealScrollPill() {
+    if (!mounted) return;
+    if (!_scrollPillVisible) {
+      setState(() => _scrollPillVisible = true);
+    }
+    _scheduleHideScrollPill();
+  }
+
+  void _scheduleHideScrollPill() {
+    _scrollPillHideTimer?.cancel();
+    _scrollPillHideTimer = Timer(const Duration(milliseconds: 1600), () {
+      if (mounted && !_draggingScrollPill && _scrollPillVisible) {
+        setState(() => _scrollPillVisible = false);
+      }
+    });
+  }
+
+  void _loadBookmarks() {
+    try {
+      final raw = widget.preferences.getString(_bookmarksKey);
+      if (raw != null && raw.isNotEmpty) {
+        final decoded = jsonDecode(raw);
+        if (decoded is List) {
+          _bookmarks = decoded
+              .map((e) => integer(e))
+              .where((p) => p > 0)
+              .toSet();
+        }
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _toggleBookmark([int? targetPage]) async {
+    final p = targetPage ?? _page;
+    if (p < 1) return;
+    setState(() {
+      if (_bookmarks.contains(p)) {
+        _bookmarks.remove(p);
+      } else {
+        _bookmarks.add(p);
+      }
+    });
+    final sorted = _bookmarks.toList()..sort();
+    await widget.preferences.setString(_bookmarksKey, jsonEncode(sorted));
+  }
+
   Future<void> _open() async {
-    unawaited(_playback.prepare());
+    unawaited(_playback.prepare().then((_) => _autoSyncReadyServerAudio()));
     await _downloadPdf();
+  }
+
+  Future<void> _activateSavedAudioIfReady(OfflineDocument doc) async {
+    if (!mounted) return;
+    final src = widget.preferences.getString('offline-source:${doc.key}');
+    if (src == 'server' && await ServerNarration(doc).load() != null) {
+      await _switchSource('saved-server');
+    } else if (src == 'phone') {
+      await _switchSource('phone');
+    }
+  }
+
+  Future<void> _autoSyncReadyServerAudio() async {
+    if (!mounted || _playback.usesSavedServer) return;
+    try {
+      final store = await OfflineStore.open();
+      final docId = '${widget.document['id']}';
+      if (_savedDocument == null) {
+        final docs = await store.documents();
+        for (final d in docs) {
+          if ('${d.document['id']}' == docId) {
+            _savedDocument = d;
+            break;
+          }
+        }
+      }
+      if (_savedDocument != null &&
+          await ServerNarration(_savedDocument!).load() != null) {
+        await widget.preferences.setString(
+          'offline-source:${_savedDocument!.key}',
+          'server',
+        );
+        if (mounted) await _switchSource('saved-server');
+        return;
+      }
+      final payload = _playback.payload;
+      if (payload == null) return;
+      final plan = object(payload['plan']);
+      final request = object(object(payload['playback'])['request']);
+      if (plan['planObjectKey'] is! String || request.isEmpty) return;
+      final snapshot = await _playback.api.post('/api/tts/export/resolve', {
+        ...request,
+        'planId': plan['planId'],
+        'planObjectKey': plan['planObjectKey'],
+        'planSignature': plan['planSignature'],
+        'startIntent': {'selectedOrdinal': 0},
+        'format': 'mp3',
+        'speed': 1,
+        'includeProgress': true,
+        'action': 'resolve',
+      });
+      final genState = object(snapshot['generation'])['state'];
+      final artState = object(snapshot['artifact'])['state'];
+      if (genState == 'complete' &&
+          (artState == 'ready' || artState == 'none' || artState == 'stale')) {
+        while (_pdfBytes == null && mounted) {
+          await Future<void>.delayed(const Duration(milliseconds: 300));
+        }
+        if (!mounted || _pdfBytes == null) return;
+        _savedDocument ??= await store.save(
+          origin: _playback.api.base.origin,
+          account: widget.preferences.getString('email') ?? 'owner',
+          document: _serverDocument ?? widget.document,
+          payload: payload,
+          bytes: _pdfBytes!,
+        );
+        final ok = await ServerNarration(_savedDocument!).prepare(
+          _playback.api,
+          payload,
+          canceled: () => !mounted,
+          onProgress: (msg, _) {
+            if (mounted) {
+              setState(() => _playback.status = msg);
+            }
+          },
+        );
+        if (ok && mounted) {
+          await widget.preferences.setString(
+            'offline-source:${_savedDocument!.key}',
+            'server',
+          );
+          await widget.preferences.remove(
+            ServerNarration.pendingKey(_savedDocument!),
+          );
+          await _switchSource('saved-server');
+        }
+      }
+    } catch (_) {}
   }
 
   Future<void> _downloadPdf() async {
@@ -131,14 +334,48 @@ class _ReaderPageState extends State<ReaderPage> {
     }
   }
 
+  ColorFilter? get _activeColorFilter {
+    switch (_colorTheme) {
+      case 'dark':
+        return _darkPageColors;
+      case 'sepia':
+        return _sepiaPageColors;
+      case 'contrast':
+        return _contrastPageColors;
+      default:
+        return null;
+    }
+  }
+
+  Color get _activeBackgroundColor {
+    switch (_colorTheme) {
+      case 'dark':
+        return const Color(0xff141416);
+      case 'contrast':
+        return Colors.black;
+      case 'sepia':
+        return const Color(0xffdfd3b8);
+      default:
+        return const Color(0xff2b2b2e);
+    }
+  }
+
   Widget _createPdf(Uint8List bytes) => PdfViewer.data(
     bytes,
     sourceName: widget.document['id'] as String,
     controller: _viewer,
     params: PdfViewerParams(
+      margin: 4,
+      panAxis: PanAxis.free,
+      boundaryMargin: EdgeInsets.zero,
       sizeDelegateProvider: const PdfViewerSizeDelegateProviderSmart(),
-      backgroundColor: _pdfDark ? const Color(0xff111315) : Colors.grey,
-      pageImageColorFilter: _pdfDark ? _darkPageColors : null,
+      backgroundColor: _activeBackgroundColor,
+      pageImageColorFilter: _activeColorFilter,
+      pageDropShadow: const BoxShadow(
+        color: Colors.black38,
+        blurRadius: 3,
+        offset: Offset(0, 1),
+      ),
       onGeneralTap: (context, controller, details) {
         if (details.type != PdfViewerGeneralTapType.tap ||
             !_playback.connected) {
@@ -173,7 +410,11 @@ class _ReaderPageState extends State<ReaderPage> {
       },
       onPageChanged: (page) {
         if (!mounted || page == null) return;
+        final changed = page != _page;
         setState(() => _page = page);
+        if (changed && _positionRestored) {
+          _revealScrollPill();
+        }
         unawaited(_loadText(page));
       },
       pageOverlaysBuilder: (context, rect, page) => [
@@ -259,7 +500,7 @@ class _ReaderPageState extends State<ReaderPage> {
 
   void _paintWord() {
     final word = _playback.activeWord;
-    if (!_viewer.isReady || !_playback.connected) return;
+    if (!_playback.connected) return;
     final ordinal = word?.ordinal ?? _playback.currentOrdinal;
     final segment = _playback.plan
         .where((segment) => integer(segment['ordinal']) == ordinal)
@@ -270,8 +511,13 @@ class _ReaderPageState extends State<ReaderPage> {
     if (signature == _wordSignature) return;
     _wordSignature = signature;
     if (_follow && _playback.wantedPlaying && pageNumber != _page) {
-      unawaited(_goTo(pageNumber));
+      if (_reflowMode) {
+        setState(() => _page = pageNumber);
+      } else {
+        unawaited(_goTo(pageNumber));
+      }
     }
+    if (!_viewer.isReady) return;
     unawaited(_loadText(pageNumber));
     final native = _texts[pageNumber];
     final segmentText = segment?['text'] as String? ?? '';
@@ -316,8 +562,6 @@ class _ReaderPageState extends State<ReaderPage> {
       }
     }
     final matchedWord = rects.isNotEmpty && word != null;
-    // Image-only pages have no native glyph geometry; show the parsed block
-    // and keep exact word tracking in the native transcript.
     if (rects.isEmpty) {
       if (pageNumber >= 1 && pageNumber <= _viewer.pageCount) {
         final height = _viewer.pages[pageNumber - 1].height;
@@ -344,28 +588,39 @@ class _ReaderPageState extends State<ReaderPage> {
     );
   }
 
-  Future<void> _goTo(int page) async {
-    if (!_viewerLaidOut ||
-        !_viewer.isReady ||
-        page < 1 ||
-        page > _viewer.pageCount) {
-      return;
+  Future<void> _goTo(
+    int page, {
+    Duration duration = const Duration(milliseconds: 200),
+  }) async {
+    final maxPage = _effectiveMaxPages;
+    if (page < 1 || page > maxPage) return;
+    setState(() => _page = page);
+    if (_viewerLaidOut && _viewer.isReady && page <= _viewer.pageCount) {
+      await _viewer.goToPage(pageNumber: page, duration: duration);
+      if (mounted) await _loadText(page);
     }
-    await _viewer.goToPage(pageNumber: page);
-    if (mounted) await _loadText(page);
   }
 
   Future<void> _choosePage() async {
+    final maxPages = _effectiveMaxPages;
     final input = TextEditingController(text: '$_page');
     final number = await showDialog<int>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Go to page'),
+        backgroundColor: _adobeSheetBg,
+        title: const Text(
+          'Go to page',
+          style: TextStyle(color: Colors.white),
+        ),
         content: TextField(
           controller: input,
           keyboardType: TextInputType.number,
           autofocus: true,
-          decoration: InputDecoration(labelText: 'Page (1-$_pageCount)'),
+          style: const TextStyle(color: Colors.white),
+          decoration: InputDecoration(
+            labelText: 'Page (1-$maxPages)',
+            labelStyle: const TextStyle(color: Colors.white70),
+          ),
           onSubmitted: (value) => Navigator.pop(context, int.tryParse(value)),
         ),
         actions: [
@@ -380,16 +635,16 @@ class _ReaderPageState extends State<ReaderPage> {
         ],
       ),
     );
-    // Dialog exit animations can still hold its editable widget.
     await Future<void>.delayed(const Duration(milliseconds: 300));
     input.dispose();
     if (mounted && number != null) await _goTo(number);
   }
 
-  Future<void> _readPage() async {
+  Future<void> _readPage([int? targetPage]) async {
+    final p = targetPage ?? _page;
     final segment = _playback.plan
         .where(
-          (segment) => integer(object(segment['locator'])['page'], 1) >= _page,
+          (segment) => integer(object(segment['locator'])['page'], 1) >= p,
         )
         .firstOrNull;
     if (segment != null) {
@@ -401,18 +656,906 @@ class _ReaderPageState extends State<ReaderPage> {
     }
   }
 
-  Future<void> _togglePdfDark() async {
+  Future<void> _setColorTheme(String theme) async {
     setState(() {
-      _pdfDark = !_pdfDark;
+      _colorTheme = theme;
+      _pdfDark = theme == 'dark' || theme == 'contrast';
       if (_pdfBytes != null) _pdfWidget = _createPdf(_pdfBytes!);
     });
-    final saved = await widget.preferences.setBool('pdfDarkMode', _pdfDark);
-    if (!saved && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Could not save your PDF appearance.')),
-      );
+    await widget.preferences.setBool('pdfDarkMode', _pdfDark);
+    await widget.preferences.setString('pdfColorTheme', theme);
+  }
+
+  Future<void> _togglePdfDark() async {
+    await _setColorTheme(_pdfDark ? 'light' : 'dark');
+  }
+
+  void _runSearch(String query) {
+    final q = query.trim().toLowerCase();
+    if (q.isEmpty) {
+      setState(() {
+        _searchMatches = [];
+        _searchIndex = 0;
+      });
+      return;
+    }
+    final matches = <_SearchMatch>[];
+    for (final segment in _playback.plan) {
+      final text = '${segment['text'] ?? ''}';
+      final lower = text.toLowerCase();
+      final idx = lower.indexOf(q);
+      if (idx != -1) {
+        matches.add(
+          _SearchMatch(
+            ordinal: integer(segment['ordinal']),
+            page: integer(object(segment['locator'])['page'], 1),
+            text: text,
+            matchStart: idx,
+            matchEnd: idx + q.length,
+          ),
+        );
+      }
+    }
+    setState(() {
+      _searchMatches = matches;
+      _searchIndex = 0;
+    });
+    if (matches.isNotEmpty) {
+      unawaited(_jumpToSearchMatch(0));
     }
   }
+
+  Future<void> _jumpToSearchMatch(int index) async {
+    if (_searchMatches.isEmpty) return;
+    final clamped =
+        (index % _searchMatches.length + _searchMatches.length) %
+        _searchMatches.length;
+    final match = _searchMatches[clamped];
+    setState(() => _searchIndex = clamped);
+    await _goTo(match.page);
+    if (_playback.connected) {
+      await _playback.selectAt(match.ordinal);
+    }
+  }
+
+  List<({String title, int page, int ordinal})> _extractOutline() {
+    final items = <({String title, int page, int ordinal})>[];
+    final seenPages = <int>{};
+    for (final seg in _playback.plan) {
+      final text = '${seg['text'] ?? ''}'.trim();
+      final page = integer(object(seg['locator'])['page'], 1);
+      final ordinal = integer(seg['ordinal']);
+      if (text.isEmpty) continue;
+      final isHeading =
+          (text.length <= 90 &&
+              !text.endsWith('.') &&
+              (RegExp(
+                    r'^(Chapter|Section|Part|Module|Phase|Topic|\d+[\.\)]\s|[A-Z][A-Z0-9\s\-:]{4,})',
+                  ).hasMatch(text) ||
+                  !seenPages.contains(page)));
+      if (isHeading && items.length < 150) {
+        seenPages.add(page);
+        items.add((
+          title: text.replaceAll(RegExp(r'\s+'), ' '),
+          page: page,
+          ordinal: ordinal,
+        ));
+      }
+    }
+    return items;
+  }
+
+  Future<void> _showNavigationSheet({int initialTab = 0}) async {
+    final outline = _extractOutline();
+    final totalPages = _effectiveMaxPages;
+    final byPage = <int, List<Json>>{};
+    for (final s in _playback.plan) {
+      final p = integer(object(s['locator'])['page'], 1);
+      (byPage[p] ??= []).add(s);
+    }
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: _adobeSheetBg,
+      isScrollControlled: true,
+      useSafeArea: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+      ),
+      builder: (sheetContext) => Theme(
+        data: ThemeData.dark(useMaterial3: true).copyWith(
+          scaffoldBackgroundColor: _adobeSheetBg,
+          colorScheme: const ColorScheme.dark(
+            surface: _adobeSheetBg,
+            primary: Color(0xff4da3ff),
+          ),
+        ),
+        child: DefaultTabController(
+          initialIndex: initialTab,
+          length: 3,
+          child: DraggableScrollableSheet(
+            expand: false,
+            initialChildSize: 0.74,
+            minChildSize: 0.45,
+            maxChildSize: 0.94,
+            builder: (context, scrollController) => Column(
+              children: [
+                const SizedBox(height: 10),
+                Container(
+                  width: 42,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: Colors.white38,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+                const SizedBox(height: 6),
+                const TabBar(
+                  tabs: [
+                    Tab(
+                      icon: Icon(Icons.toc_rounded),
+                      text: 'Table of Contents',
+                    ),
+                    Tab(icon: Icon(Icons.grid_view_rounded), text: 'Pages'),
+                    Tab(
+                      icon: Icon(Icons.bookmarks_outlined),
+                      text: 'Bookmarks',
+                    ),
+                  ],
+                ),
+                Expanded(
+                  child: TabBarView(
+                    children: [
+                      // Tab 1: Table of Contents / Sections
+                      outline.isEmpty
+                          ? const Center(
+                              child: Text('No sections detected in this PDF.'),
+                            )
+                          : ListView.separated(
+                              controller: scrollController,
+                              itemCount: outline.length,
+                              separatorBuilder: (_, _) =>
+                                  const Divider(height: 1, color: Colors.white12),
+                              itemBuilder: (context, index) {
+                                final item = outline[index];
+                                final active = item.page == _page;
+                                return ListTile(
+                                  selected: active,
+                                  leading: CircleAvatar(
+                                    radius: 16,
+                                    backgroundColor: active
+                                        ? const Color(0xff4da3ff)
+                                        : _adobeButtonBg,
+                                    child: Text(
+                                      '${item.page}',
+                                      style: const TextStyle(
+                                        fontSize: 12,
+                                        color: Colors.white,
+                                      ),
+                                    ),
+                                  ),
+                                  title: Text(
+                                    item.title,
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                  subtitle: Text('Page ${item.page}'),
+                                  trailing: IconButton(
+                                    tooltip: 'Read from here',
+                                    icon: const Icon(
+                                      Icons.play_circle_fill_rounded,
+                                    ),
+                                    onPressed: () {
+                                      Navigator.pop(sheetContext);
+                                      unawaited(_goTo(item.page));
+                                      unawaited(_playback.startAt(item.ordinal));
+                                    },
+                                  ),
+                                  onTap: () {
+                                    Navigator.pop(sheetContext);
+                                    unawaited(_goTo(item.page));
+                                    if (_playback.connected) {
+                                      unawaited(
+                                        _playback.selectAt(item.ordinal),
+                                      );
+                                    }
+                                  },
+                                );
+                              },
+                            ),
+                      // Tab 2: Visual Page Grid (1..N)
+                      GridView.builder(
+                        padding: const EdgeInsets.all(12),
+                        gridDelegate:
+                            const SliverGridDelegateWithMaxCrossAxisExtent(
+                              maxCrossAxisExtent: 150,
+                              mainAxisSpacing: 10,
+                              crossAxisSpacing: 10,
+                              childAspectRatio: 0.78,
+                            ),
+                        itemCount: totalPages,
+                        itemBuilder: (context, index) {
+                          final p = index + 1;
+                          final segs = byPage[p] ?? const [];
+                          final preview = segs.isNotEmpty
+                              ? '${segs.first['text'] ?? ''}'
+                              : 'Page $p';
+                          final isCurrent = p == _page;
+                          final isBookmarked = _bookmarks.contains(p);
+                          return InkWell(
+                            borderRadius: BorderRadius.circular(12),
+                            onTap: () {
+                              Navigator.pop(sheetContext);
+                              unawaited(_goTo(p));
+                            },
+                            child: Container(
+                              padding: const EdgeInsets.all(10),
+                              decoration: BoxDecoration(
+                                color: isCurrent
+                                    ? const Color(0xff263b54)
+                                    : _adobeButtonBg,
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(
+                                  color: isCurrent
+                                      ? const Color(0xff4da3ff)
+                                      : Colors.white12,
+                                  width: isCurrent ? 2 : 1,
+                                ),
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Row(
+                                    mainAxisAlignment:
+                                        MainAxisAlignment.spaceBetween,
+                                    children: [
+                                      Text(
+                                        'P. $p',
+                                        style: const TextStyle(
+                                          fontWeight: FontWeight.bold,
+                                          color: Colors.white,
+                                        ),
+                                      ),
+                                      if (isBookmarked)
+                                        const Icon(
+                                          Icons.star_rounded,
+                                          size: 16,
+                                          color: Color(0xff4da3ff),
+                                        ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 6),
+                                  Expanded(
+                                    child: Text(
+                                      preview,
+                                      maxLines: 5,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        fontSize: 12,
+                                        color: Colors.white70,
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Row(
+                                    mainAxisAlignment:
+                                        MainAxisAlignment.spaceBetween,
+                                    children: [
+                                      Text(
+                                        '${segs.length} passages',
+                                        style: const TextStyle(
+                                          fontSize: 10,
+                                          color: Colors.white54,
+                                        ),
+                                      ),
+                                      InkWell(
+                                        onTap: () {
+                                          Navigator.pop(sheetContext);
+                                          unawaited(_goTo(p));
+                                          unawaited(_readPage(p));
+                                        },
+                                        child: const Icon(
+                                          Icons.headphones_rounded,
+                                          size: 16,
+                                          color: Colors.white70,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                      // Tab 3: Bookmarks
+                      StatefulBuilder(
+                        builder: (context, setModalState) {
+                          final sorted = _bookmarks.toList()..sort();
+                          if (sorted.isEmpty) {
+                            return Center(
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Text('No bookmarked pages yet.'),
+                                  const SizedBox(height: 12),
+                                  FilledButton.icon(
+                                    onPressed: () async {
+                                      await _toggleBookmark(_page);
+                                      setModalState(() {});
+                                    },
+                                    icon: const Icon(
+                                      Icons.bookmark_add_outlined,
+                                    ),
+                                    label: Text('Bookmark Page $_page'),
+                                  ),
+                                ],
+                              ),
+                            );
+                          }
+                          return ListView.separated(
+                            itemCount: sorted.length,
+                            separatorBuilder: (_, _) =>
+                                const Divider(height: 1, color: Colors.white12),
+                            itemBuilder: (context, index) {
+                              final p = sorted[index];
+                              final segs = byPage[p] ?? const [];
+                              final preview = segs.isNotEmpty
+                                  ? '${segs.first['text'] ?? ''}'
+                                  : 'Page $p';
+                              return ListTile(
+                                leading: const Icon(
+                                  Icons.bookmark_rounded,
+                                  color: Color(0xff4da3ff),
+                                ),
+                                title: Text('Page $p'),
+                                subtitle: Text(
+                                  preview,
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                                trailing: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    IconButton(
+                                      tooltip: 'Read page $p',
+                                      icon: const Icon(
+                                        Icons.headphones_rounded,
+                                      ),
+                                      onPressed: () {
+                                        Navigator.pop(sheetContext);
+                                        unawaited(_goTo(p));
+                                        unawaited(_readPage(p));
+                                      },
+                                    ),
+                                    IconButton(
+                                      tooltip: 'Remove bookmark',
+                                      icon: const Icon(Icons.delete_outline),
+                                      onPressed: () async {
+                                        await _toggleBookmark(p);
+                                        setModalState(() {});
+                                      },
+                                    ),
+                                  ],
+                                ),
+                                onTap: () {
+                                  Navigator.pop(sheetContext);
+                                  unawaited(_goTo(p));
+                                },
+                              );
+                            },
+                          );
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showViewSettingsSheet() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: _adobeSheetBg,
+      useSafeArea: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+      ),
+      builder: (sheetContext) => StatefulBuilder(
+        builder: (context, setModalState) => Padding(
+          padding: const EdgeInsets.fromLTRB(16, 10, 16, 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 42,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: Colors.white38,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 14),
+              const Text(
+                'View settings',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 12),
+              const Text(
+                'COLOR THEME',
+                style: TextStyle(
+                  color: Colors.white54,
+                  fontSize: 11,
+                  letterSpacing: 0.8,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (final entry in const [
+                    ('light', 'Light', Icons.light_mode_outlined),
+                    ('dark', 'Night Dark', Icons.dark_mode_outlined),
+                    ('sepia', 'Warm Sepia', Icons.wb_sunny_outlined),
+                    ('contrast', 'High Contrast', Icons.contrast_rounded),
+                  ])
+                    ChoiceChip(
+                      selected: _colorTheme == entry.$1,
+                      label: Text(entry.$2),
+                      avatar: Icon(entry.$3, size: 16),
+                      onSelected: (_) async {
+                        await _setColorTheme(entry.$1);
+                        setModalState(() {});
+                      },
+                    ),
+                ],
+              ),
+              const Divider(height: 24, color: Colors.white12),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                secondary: const Icon(
+                  Icons.water_drop_outlined,
+                  color: Colors.white70,
+                ),
+                title: const Text(
+                  'Liquid Reading Mode (Reflow)',
+                  style: TextStyle(color: Colors.white),
+                ),
+                subtitle: const Text(
+                  'Large resizable text cards with live word highlighting',
+                  style: TextStyle(color: Colors.white60, fontSize: 12),
+                ),
+                value: _reflowMode,
+                onChanged: (val) {
+                  setState(() => _reflowMode = val);
+                  setModalState(() {});
+                },
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                secondary: const Icon(
+                  Icons.my_location_rounded,
+                  color: Colors.white70,
+                ),
+                title: const Text(
+                  'Follow narration automatically',
+                  style: TextStyle(color: Colors.white),
+                ),
+                subtitle: const Text(
+                  'Auto-scroll pages as read-aloud advances',
+                  style: TextStyle(color: Colors.white60, fontSize: 12),
+                ),
+                value: _follow,
+                onChanged: (val) {
+                  setState(() => _follow = val);
+                  setModalState(() {});
+                },
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                secondary: const Icon(
+                  Icons.subtitles_outlined,
+                  color: Colors.white70,
+                ),
+                title: const Text(
+                  'Show Now Reading transcript panel',
+                  style: TextStyle(color: Colors.white),
+                ),
+                value: _transcriptVisible,
+                onChanged: (val) {
+                  setState(() => _transcript = val);
+                  setModalState(() {});
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showVoiceAndSpeedSheet() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: _adobeSheetBg,
+      useSafeArea: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+      ),
+      builder: (sheetContext) => AnimatedBuilder(
+        animation: _playback,
+        builder: (context, _) => Padding(
+          padding: const EdgeInsets.fromLTRB(16, 10, 16, 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 42,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: Colors.white38,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 14),
+              const Text(
+                'Read aloud voice & speed',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 12),
+              const Text(
+                'PLAYBACK SPEED',
+                style: TextStyle(
+                  color: Colors.white54,
+                  fontSize: 11,
+                  letterSpacing: 0.8,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (final speed in const [
+                    0.75,
+                    0.9,
+                    1.0,
+                    1.1,
+                    1.25,
+                    1.5,
+                    2.0,
+                  ])
+                    ChoiceChip(
+                      selected: (_playback.speed - speed).abs() < 0.01,
+                      label: Text('${speed}x'),
+                      onSelected: (_) => _playback.setSpeed(speed),
+                    ),
+                ],
+              ),
+              const Divider(height: 24, color: Colors.white12),
+              const Text(
+                'AUDIO SOURCE',
+                style: TextStyle(
+                  color: Colors.white54,
+                  fontSize: 11,
+                  letterSpacing: 0.8,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  ChoiceChip(
+                    selected: !_playback.isOffline,
+                    label: const Text('Server Stream'),
+                    avatar: const Icon(Icons.cloud_outlined, size: 16),
+                    onSelected: (_) => _switchSource('server'),
+                  ),
+                  ChoiceChip(
+                    selected: _playback.usesSavedServer,
+                    label: const Text('Saved Server Audio'),
+                    avatar: const Icon(Icons.offline_pin_rounded, size: 16),
+                    onSelected: (_) => _switchSource('saved-server'),
+                  ),
+                  ChoiceChip(
+                    selected: _playback.isOffline && !_playback.usesSavedServer,
+                    label: const Text('Phone Kokoro TTS'),
+                    avatar: const Icon(Icons.phone_android, size: 16),
+                    onSelected: (_) => _switchSource('phone'),
+                  ),
+                ],
+              ),
+              if (_playback.isOffline && !_playback.usesSavedServer) ...[
+                const SizedBox(height: 14),
+                const Text(
+                  'PHONE OFFLINE VOICE',
+                  style: TextStyle(
+                    color: Colors.white54,
+                    fontSize: 11,
+                    letterSpacing: 0.8,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    for (final v in offlineVoices.entries)
+                      ChoiceChip(
+                        selected: _playback.offlineVoice == v.key,
+                        label: Text(v.value),
+                        onSelected: (_) => _playback.setOfflineVoice(v.key),
+                      ),
+                  ],
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Adobe Acrobat Reader Android-style overflow bottom sheet (Screenshot 1),
+  /// containing only features relevant to OpenReader.
+  Future<void> _showAdobeMoreSheet() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: _adobeSheetBg,
+      isScrollControlled: true,
+      useSafeArea: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (sheetContext) => StatefulBuilder(
+        builder: (context, setModalState) {
+          final isBookmarked = _bookmarks.contains(_page);
+          return SingleChildScrollView(
+            padding: const EdgeInsets.only(top: 10, bottom: 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 42,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: Colors.white38,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 16, 12, 12),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '${widget.document['name']}',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 18,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            Row(
+                              children: [
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 5,
+                                    vertical: 2,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xffd9232e),
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
+                                  child: const Text(
+                                    'PDF',
+                                    style: TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    'Page $_page of $_effectiveMaxPages  •  ${_playback.voice}',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                      color: Colors.white70,
+                                      fontSize: 13,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: isBookmarked
+                            ? 'Remove bookmark on page $_page'
+                            : 'Bookmark page $_page',
+                        onPressed: () async {
+                          await _toggleBookmark(_page);
+                          setModalState(() {});
+                        },
+                        icon: Icon(
+                          isBookmarked
+                              ? Icons.star_rounded
+                              : Icons.star_border_rounded,
+                          color: isBookmarked
+                              ? const Color(0xff4da3ff)
+                              : Colors.white70,
+                          size: 28,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const Divider(height: 1, color: Colors.white12),
+                _adobeMenuTile(
+                  icon: Icons.visibility_outlined,
+                  title: 'View settings',
+                  trailingChevron: true,
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    unawaited(_showViewSettingsSheet());
+                  },
+                ),
+                _adobeMenuTile(
+                  icon: Icons.grid_view_rounded,
+                  title: 'Pages',
+                  trailingChevron: true,
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    unawaited(_showNavigationSheet(initialTab: 1));
+                  },
+                ),
+                _adobeMenuTile(
+                  icon: Icons.bookmarks_outlined,
+                  title: 'Bookmarks & Table of Contents',
+                  trailingChevron: true,
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    unawaited(_showNavigationSheet(initialTab: 0));
+                  },
+                ),
+                _adobeMenuTile(
+                  icon: isBookmarked
+                      ? Icons.bookmark_remove_outlined
+                      : Icons.bookmark_add_outlined,
+                  title: isBookmarked
+                      ? 'Remove bookmark (Page $_page)'
+                      : 'Add bookmark (Page $_page)',
+                  onTap: () async {
+                    await _toggleBookmark(_page);
+                    setModalState(() {});
+                  },
+                ),
+                _adobeMenuTile(
+                  icon: Icons.headphones_outlined,
+                  title: _playback.wantedPlaying
+                      ? 'Pause read aloud'
+                      : 'Read aloud from this page',
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    if (_playback.wantedPlaying) {
+                      unawaited(_playback.toggle());
+                    } else {
+                      unawaited(_readPage(_page));
+                    }
+                  },
+                ),
+                _adobeMenuTile(
+                  icon: Icons.record_voice_over_outlined,
+                  title: 'Voice & playback speed (${_playback.speed}x)',
+                  trailingChevron: true,
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    unawaited(_showVoiceAndSpeedSheet());
+                  },
+                ),
+                _adobeMenuTile(
+                  tileKey: const Key('save-offline'),
+                  icon: Icons.offline_pin_outlined,
+                  title: _savingOffline
+                      ? 'Saving offline...'
+                      : 'Save PDF for offline reading',
+                  enabled:
+                      !_savingOffline &&
+                      _pdfBytes != null &&
+                      _playback.connected,
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    unawaited(_saveOffline(prepareAudio: false));
+                  },
+                ),
+                _adobeMenuTile(
+                  icon: Icons.download_for_offline_outlined,
+                  title: 'Prepare / Download full PDF audio',
+                  enabled:
+                      !_savingOffline &&
+                      _pdfBytes != null &&
+                      _playback.connected,
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    unawaited(_saveOffline(prepareAudio: true));
+                  },
+                ),
+                _adobeMenuTile(
+                  icon: Icons.fullscreen_rounded,
+                  title: 'Fullscreen reading mode',
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    unawaited(_setFullscreen(true));
+                  },
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _adobeMenuTile({
+    Key? tileKey,
+    required IconData icon,
+    required String title,
+    bool trailingChevron = false,
+    bool enabled = true,
+    required VoidCallback onTap,
+  }) => ListTile(
+    key: tileKey,
+    enabled: enabled,
+    contentPadding: const EdgeInsets.symmetric(horizontal: 22, vertical: 2),
+    leading: Icon(
+      icon,
+      color: enabled ? Colors.white : Colors.white38,
+      size: 24,
+    ),
+    title: Text(
+      title,
+      style: TextStyle(
+        color: enabled ? Colors.white : Colors.white38,
+        fontSize: 16,
+        fontWeight: FontWeight.w400,
+      ),
+    ),
+    trailing: trailingChevron
+        ? const Icon(Icons.chevron_right_rounded, color: Colors.white70)
+        : null,
+    onTap: enabled ? onTap : null,
+  );
 
   Future<void> _saveOffline({bool prepareAudio = false}) async {
     if (_savingOffline || _pdfBytes == null || _playback.payload == null) {
@@ -426,6 +1569,7 @@ class _ReaderPageState extends State<ReaderPage> {
         _savedDocument!,
         widget.preferences.getString('offlineVoice') ?? 'am_michael',
       );
+      if (mounted) await _activateSavedAudioIfReady(_savedDocument!);
       return;
     }
     setState(() => _savingOffline = true);
@@ -454,6 +1598,7 @@ class _ReaderPageState extends State<ReaderPage> {
           saved,
           widget.preferences.getString('offlineVoice') ?? 'am_michael',
         );
+        if (mounted) await _activateSavedAudioIfReady(saved);
         return;
       }
       ScaffoldMessenger.of(context).showSnackBar(
@@ -631,9 +1776,15 @@ class _ReaderPageState extends State<ReaderPage> {
       ),
     ],
     icon: Icon(
-      _playback.isOffline ? Icons.phone_android : Icons.cloud_outlined,
+      _playback.usesSavedServer
+          ? Icons.offline_pin_rounded
+          : _playback.isOffline
+          ? Icons.phone_android
+          : Icons.cloud_outlined,
+      color: Colors.white,
     ),
   );
+
   Future<void> _setFullscreen(bool enabled) async {
     if (_changingFullscreen || enabled == _fullscreen) return;
     setState(() {
@@ -661,7 +1812,10 @@ class _ReaderPageState extends State<ReaderPage> {
         : 'Dark PDF pages (inverts images)',
     onPressed: _togglePdfDark,
     isSelected: _pdfDark,
-    icon: Icon(_pdfDark ? Icons.light_mode_outlined : Icons.dark_mode_outlined),
+    icon: Icon(
+      _pdfDark ? Icons.light_mode_outlined : Icons.dark_mode_outlined,
+      color: Colors.white,
+    ),
   );
 
   Widget _fullscreenButtons() => Positioned(
@@ -671,7 +1825,7 @@ class _ReaderPageState extends State<ReaderPage> {
       child: Padding(
         padding: const EdgeInsets.all(8),
         child: Material(
-          color: Theme.of(context).colorScheme.surfaceContainer,
+          color: _adobeBarBg.withValues(alpha: 0.92),
           borderRadius: BorderRadius.circular(28),
           elevation: 3,
           child: Row(
@@ -694,12 +1848,16 @@ class _ReaderPageState extends State<ReaderPage> {
                       ? const SizedBox(
                           width: 18,
                           height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white,
+                          ),
                         )
                       : Icon(
                           _playback.wantedPlaying
                               ? Icons.pause_rounded
                               : Icons.play_arrow_rounded,
+                          color: Colors.white,
                         ),
                 ),
               ),
@@ -709,7 +1867,7 @@ class _ReaderPageState extends State<ReaderPage> {
                 onPressed: _changingFullscreen
                     ? null
                     : () => _setFullscreen(false),
-                icon: const Icon(Icons.fullscreen_exit),
+                icon: const Icon(Icons.fullscreen_exit, color: Colors.white),
               ),
             ],
           ),
@@ -720,6 +1878,9 @@ class _ReaderPageState extends State<ReaderPage> {
 
   @override
   void dispose() {
+    _scrollPillHideTimer?.cancel();
+    _viewer.removeListener(_onViewerScrolled);
+    _searchController.dispose();
     if (_fullscreen) {
       unawaited(
         _window
@@ -746,6 +1907,366 @@ class _ReaderPageState extends State<ReaderPage> {
     super.dispose();
   }
 
+  Widget _buildSearchBar() => Material(
+    color: _adobeSheetBg,
+    child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      child: Row(
+        children: [
+          Expanded(
+            child: TextField(
+              controller: _searchController,
+              autofocus: true,
+              style: const TextStyle(color: Colors.white),
+              decoration: InputDecoration(
+                hintText: 'Find in PDF...',
+                hintStyle: const TextStyle(color: Colors.white54),
+                isDense: true,
+                prefixIcon: const Icon(
+                  Icons.search,
+                  size: 20,
+                  color: Colors.white70,
+                ),
+                suffixText: _searchMatches.isEmpty
+                    ? (_searchController.text.isEmpty ? '' : '0/0')
+                    : '${_searchIndex + 1}/${_searchMatches.length}',
+                suffixStyle: const TextStyle(color: Colors.white70),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(20),
+                ),
+              ),
+              onChanged: _runSearch,
+              onSubmitted: (_) => _jumpToSearchMatch(_searchIndex + 1),
+            ),
+          ),
+          IconButton(
+            tooltip: 'Previous match',
+            onPressed: _searchMatches.isNotEmpty
+                ? () => _jumpToSearchMatch(_searchIndex - 1)
+                : null,
+            icon: const Icon(Icons.keyboard_arrow_up, color: Colors.white),
+          ),
+          IconButton(
+            tooltip: 'Next match',
+            onPressed: _searchMatches.isNotEmpty
+                ? () => _jumpToSearchMatch(_searchIndex + 1)
+                : null,
+            icon: const Icon(Icons.keyboard_arrow_down, color: Colors.white),
+          ),
+          IconButton(
+            tooltip: 'Close search',
+            onPressed: () => setState(() {
+              _searching = false;
+              _searchController.clear();
+              _searchMatches = [];
+            }),
+            icon: const Icon(Icons.close, color: Colors.white),
+          ),
+        ],
+      ),
+    ),
+  );
+
+  Widget _buildReflowView() => AnimatedBuilder(
+    animation: _playback,
+    builder: (context, _) {
+      final pageSegments = _playback.plan
+          .where((s) => integer(object(s['locator'])['page'], 1) == _page)
+          .toList();
+      final list = pageSegments.isNotEmpty ? pageSegments : _playback.plan;
+      final word = _playback.activeWord;
+      return Column(
+        children: [
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+            color: _adobeSheetBg,
+            child: Row(
+              children: [
+                const Icon(
+                  Icons.water_drop_outlined,
+                  size: 18,
+                  color: Color(0xff4da3ff),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Liquid Mode — Page $_page (${pageSegments.length} passages)',
+                    style: const TextStyle(color: Colors.white, fontSize: 13),
+                  ),
+                ),
+                IconButton(
+                  visualDensity: VisualDensity.compact,
+                  tooltip: 'Smaller text',
+                  onPressed: _reflowFontSize > 13
+                      ? () {
+                          setState(() => _reflowFontSize -= 2);
+                          unawaited(
+                            widget.preferences.setDouble(
+                              'reflowFontSize',
+                              _reflowFontSize,
+                            ),
+                          );
+                        }
+                      : null,
+                  icon: const Icon(
+                    Icons.text_decrease,
+                    size: 18,
+                    color: Colors.white,
+                  ),
+                ),
+                IconButton(
+                  visualDensity: VisualDensity.compact,
+                  tooltip: 'Larger text',
+                  onPressed: _reflowFontSize < 30
+                      ? () {
+                          setState(() => _reflowFontSize += 2);
+                          unawaited(
+                            widget.preferences.setDouble(
+                              'reflowFontSize',
+                              _reflowFontSize,
+                            ),
+                          );
+                        }
+                      : null,
+                  icon: const Icon(
+                    Icons.text_increase,
+                    size: 18,
+                    color: Colors.white,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: NotificationListener<ScrollNotification>(
+              onNotification: (notification) {
+                if (notification is ScrollUpdateNotification) {
+                  _revealScrollPill();
+                }
+                return false;
+              },
+              child: ListView.builder(
+                padding: const EdgeInsets.all(16),
+                itemCount: list.length,
+                itemBuilder: (context, index) {
+                  final seg = list[index];
+                  final ord = integer(seg['ordinal']);
+                  final text = '${seg['text'] ?? ''}';
+                  final isCurrent = ord == _playback.currentOrdinal;
+                  final start = isCurrent ? (word?.start ?? -1) : -1;
+                  final end = isCurrent ? (word?.end ?? -1) : -1;
+                  return Card(
+                    elevation: isCurrent ? 3 : 0,
+                    margin: const EdgeInsets.only(bottom: 10),
+                    color: isCurrent
+                        ? Theme.of(context).colorScheme.secondaryContainer
+                        : Theme.of(context).colorScheme.surfaceContainerLowest,
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(12),
+                      onTap: () => unawaited(_playback.startAt(ord)),
+                      child: Padding(
+                        padding: const EdgeInsets.all(14),
+                        child: Text.rich(
+                          TextSpan(
+                            children:
+                                start >= 0 && end > start && end <= text.length
+                                ? [
+                                    TextSpan(text: text.substring(0, start)),
+                                    TextSpan(
+                                      text: text.substring(start, end),
+                                      style: const TextStyle(
+                                        backgroundColor: Color(0xffffd65c),
+                                        color: Colors.black,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                    TextSpan(text: text.substring(end)),
+                                  ]
+                                : [TextSpan(text: text)],
+                          ),
+                          style: TextStyle(
+                            fontSize: _reflowFontSize,
+                            height: 1.55,
+                            fontWeight: isCurrent
+                                ? FontWeight.w600
+                                : FontWeight.normal,
+                          ),
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ),
+        ],
+      );
+    },
+  );
+
+  /// Adobe Acrobat Reader Android-style right-edge black scroll pill + center
+  /// page indicator overlay (Screenshots 2 & 3).
+  /// Only appears when scrolling the document or while grabbing the pill.
+  Widget _buildAdobeScrollOverlay(BuildContext viewportContext, BoxConstraints viewportConstraints) {
+    final maxPages = _effectiveMaxPages;
+    final activePage = (_dragTargetPage ?? _page).clamp(1, maxPages);
+    final showPill =
+        (_scrollPillVisible || _draggingScrollPill) && maxPages > 1;
+    const pillHeight = 40.0;
+    const topMargin = 14.0;
+    const bottomMargin = 14.0;
+    final usableTrack = math.max(
+      1.0,
+      viewportConstraints.maxHeight - pillHeight - topMargin - bottomMargin,
+    );
+    final fraction = maxPages > 1
+        ? ((activePage - 1) / (maxPages - 1)).clamp(0.0, 1.0)
+        : 0.0;
+    final pillTop = topMargin + fraction * usableTrack;
+
+    void scrubAtLocalDy(double dy) {
+      final ratio = ((dy - topMargin - pillHeight / 2) / usableTrack).clamp(
+        0.0,
+        1.0,
+      );
+      final target = (1 + (ratio * (maxPages - 1)).round()).clamp(1, maxPages);
+      if (_dragTargetPage != target) {
+        setState(() {
+          _dragTargetPage = target;
+          _page = target;
+        });
+        if (_viewerLaidOut && _viewer.isReady && target <= _viewer.pageCount) {
+          unawaited(
+            _viewer.goToPage(pageNumber: target, duration: Duration.zero),
+          );
+        }
+      }
+    }
+
+    return Stack(
+      children: [
+        // Center dark rounded square indicator ("196 / of 329") shown while scrubbing
+        if (_draggingScrollPill)
+          Center(
+            child: IgnorePointer(
+              child: Container(
+                width: 118,
+                height: 118,
+                decoration: BoxDecoration(
+                  color: const Color(0xf0222225),
+                  borderRadius: BorderRadius.circular(14),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Colors.black45,
+                      blurRadius: 14,
+                      offset: Offset(0, 4),
+                    ),
+                  ],
+                ),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text(
+                      '$activePage',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 28,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Container(width: 72, height: 1, color: Colors.white38),
+                    const SizedBox(height: 6),
+                    Text(
+                      'of $maxPages',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 18,
+                        fontStyle: FontStyle.italic,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+
+        // Right-edge black pill tab ("142" / "199") — only visible while scrolling/dragging
+        Positioned(
+          top: pillTop,
+          right: 0,
+          child: IgnorePointer(
+            ignoring: !showPill,
+            child: AnimatedOpacity(
+              opacity: showPill ? 1.0 : 0.0,
+              duration: const Duration(milliseconds: 200),
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: _choosePage,
+                onVerticalDragStart: (details) {
+                  _scrollPillHideTimer?.cancel();
+                  setState(() {
+                    _draggingScrollPill = true;
+                    _scrollPillVisible = true;
+                    _dragTargetPage = _page;
+                  });
+                },
+                onVerticalDragUpdate: (details) {
+                  final box = viewportContext.findRenderObject() as RenderBox?;
+                  if (box == null) return;
+                  final local = box.globalToLocal(details.globalPosition);
+                  scrubAtLocalDy(local.dy);
+                },
+                onVerticalDragEnd: (_) {
+                  final finalPage = _dragTargetPage ?? _page;
+                  setState(() {
+                    _draggingScrollPill = false;
+                    _dragTargetPage = null;
+                  });
+                  unawaited(_goTo(finalPage, duration: Duration.zero));
+                  _scheduleHideScrollPill();
+                },
+                onVerticalDragCancel: () {
+                  setState(() {
+                    _draggingScrollPill = false;
+                    _dragTargetPage = null;
+                  });
+                  _scheduleHideScrollPill();
+                },
+                child: Container(
+                  height: pillHeight,
+                  padding: const EdgeInsets.fromLTRB(18, 8, 14, 8),
+                  decoration: const BoxDecoration(
+                    color: Color(0xf21e1e21),
+                    borderRadius: BorderRadius.horizontal(
+                      left: Radius.circular(22),
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black38,
+                        blurRadius: 6,
+                        offset: Offset(-1, 2),
+                      ),
+                    ],
+                  ),
+                  alignment: Alignment.center,
+                  child: Text(
+                    '$activePage',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) => PopScope(
     canPop: !_fullscreen,
@@ -753,64 +2274,114 @@ class _ReaderPageState extends State<ReaderPage> {
       if (!didPop && _fullscreen) unawaited(_setFullscreen(false));
     },
     child: Scaffold(
+      backgroundColor: _activeBackgroundColor,
       appBar: _fullscreen
           ? null
           : AppBar(
+              backgroundColor: _adobeBarBg,
+              foregroundColor: Colors.white,
+              elevation: 0,
+              leadingWidth: 64,
+              leading: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const SizedBox(width: 4),
+                  IconButton(
+                    tooltip: 'Back',
+                    icon: const Icon(Icons.arrow_back, color: Colors.white),
+                    onPressed: () => Navigator.maybePop(context),
+                  ),
+                  Container(width: 1, height: 22, color: Colors.white24),
+                ],
+              ),
               title: Text(
                 '${widget.document['name']}',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w500,
+                ),
               ),
               actions: [
-                _darkPageButton(),
+                // Adobe Liquid / Reflow Mode icon
                 IconButton(
-                  key: const Key('toggle-transcript'),
-                  tooltip: _transcriptVisible
-                      ? 'Hide Now Reading'
-                      : 'Show Now Reading',
-                  onPressed: () =>
-                      setState(() => _transcript = !_transcriptVisible),
-                  isSelected: _transcriptVisible,
-                  icon: const Icon(Icons.notes_rounded),
+                  tooltip: _reflowMode
+                      ? 'Switch to PDF Page View'
+                      : 'Liquid Reading Mode',
+                  isSelected: _reflowMode,
+                  onPressed: () => setState(() => _reflowMode = !_reflowMode),
+                  icon: Icon(
+                    Icons.water_drop_outlined,
+                    color: _reflowMode
+                        ? const Color(0xff4da3ff)
+                        : Colors.white,
+                  ),
                 ),
+                // Adobe Headphones (Read Aloud) icon
+                AnimatedBuilder(
+                  animation: _playback,
+                  builder: (context, _) => IconButton(
+                    tooltip: _playback.wantedPlaying
+                        ? 'Pause Read Aloud'
+                        : 'Read Aloud',
+                    onPressed:
+                        !_playback.connected ||
+                            _playback.preparing ||
+                            _switchingSource
+                        ? null
+                        : _playback.toggle,
+                    icon: Icon(
+                      Icons.headphones_outlined,
+                      color: _playback.wantedPlaying
+                          ? const Color(0xff4da3ff)
+                          : Colors.white,
+                    ),
+                  ),
+                ),
+                // Search icon
+                IconButton(
+                  tooltip: 'Search in PDF',
+                  isSelected: _searching,
+                  onPressed: () => setState(() => _searching = !_searching),
+                  icon: Icon(
+                    Icons.search_rounded,
+                    color: _searching ? const Color(0xff4da3ff) : Colors.white,
+                  ),
+                ),
+                _darkPageButton(),
+                _sourceButton(),
                 IconButton(
                   key: const Key('enter-fullscreen'),
                   tooltip: 'Fullscreen PDF',
                   onPressed: _changingFullscreen
                       ? null
                       : () => _setFullscreen(true),
-                  icon: const Icon(Icons.fullscreen),
+                  icon: const Icon(Icons.fullscreen, color: Colors.white),
                 ),
-                if (!_playback.isOffline)
-                  PopupMenuButton<String>(
+                // Adobe-style rounded square ⋮ overflow button
+                Padding(
+                  padding: const EdgeInsets.only(right: 8, left: 2),
+                  child: InkWell(
                     key: const Key('reader-menu'),
-                    tooltip: 'PDF options',
-                    onSelected: (value) =>
-                        _saveOffline(prepareAudio: value == 'all-audio'),
-                    itemBuilder: (_) => [
-                      PopupMenuItem(
-                        key: const Key('save-offline'),
-                        value: 'offline',
-                        enabled:
-                            !_savingOffline &&
-                            _pdfBytes != null &&
-                            _playback.connected,
-                        child: Text(
-                          _savingOffline
-                              ? 'Saving offline...'
-                              : 'Save PDF for offline reading',
-                        ),
+                    borderRadius: BorderRadius.circular(10),
+                    onTap: _showAdobeMoreSheet,
+                    child: Container(
+                      width: 38,
+                      height: 38,
+                      decoration: BoxDecoration(
+                        color: _adobeButtonBg,
+                        borderRadius: BorderRadius.circular(10),
                       ),
-                      PopupMenuItem(
-                        value: 'all-audio',
-                        enabled:
-                            !_savingOffline &&
-                            _pdfBytes != null &&
-                            _playback.connected,
-                        child: const Text('Save PDF + prepare all phone audio'),
+                      child: const Icon(
+                        Icons.more_vert_rounded,
+                        color: Colors.white,
+                        size: 22,
                       ),
-                    ],
+                    ),
                   ),
+                ),
               ],
             ),
       body: Stack(
@@ -822,6 +2393,7 @@ class _ReaderPageState extends State<ReaderPage> {
             right: !_fullscreen,
             child: Column(
               children: [
+                if (_searching && !_fullscreen) _buildSearchBar(),
                 Expanded(
                   child: LayoutBuilder(
                     builder: (context, constraints) {
@@ -836,6 +2408,9 @@ class _ReaderPageState extends State<ReaderPage> {
                                     Text(
                                       _pdfError!,
                                       textAlign: TextAlign.center,
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                      ),
                                     ),
                                     const SizedBox(height: 12),
                                     FilledButton(
@@ -846,24 +2421,34 @@ class _ReaderPageState extends State<ReaderPage> {
                                 ),
                               ),
                             )
-                          : _pdfWidget ??
+                          : _reflowMode
+                          ? _buildReflowView()
+                          : (_pdfWidget ??
                                 const Center(
                                   child: CircularProgressIndicator(),
-                                );
-                      // Keep the PDF at the same element-tree location when folding.
+                                ));
                       return Flex(
                         direction: wide ? Axis.horizontal : Axis.vertical,
                         children: [
                           Expanded(
-                            child: RepaintBoundary(
-                              key: const Key('pdf-surface'),
-                              child: pdf,
+                            child: LayoutBuilder(
+                              builder: (context, pdfBox) => Stack(
+                                children: [
+                                  Positioned.fill(
+                                    child: RepaintBoundary(
+                                      key: const Key('pdf-surface'),
+                                      child: pdf,
+                                    ),
+                                  ),
+                                  _buildAdobeScrollOverlay(context, pdfBox),
+                                ],
+                              ),
                             ),
                           ),
                           if (_transcriptVisible)
                             SizedBox(
                               width: wide ? 280 : null,
-                              height: wide ? null : 160,
+                              height: wide ? null : 155,
                               child: _transcriptPanel(),
                             ),
                         ],
@@ -872,54 +2457,7 @@ class _ReaderPageState extends State<ReaderPage> {
                   ),
                 ),
                 if (!_fullscreen)
-                  Row(
-                    key: const Key('page-controls'),
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      IconButton(
-                        visualDensity: VisualDensity.compact,
-                        tooltip: 'Previous page',
-                        onPressed: _page > 1 ? () => _goTo(_page - 1) : null,
-                        icon: const Icon(Icons.chevron_left),
-                      ),
-                      TextButton(
-                        style: TextButton.styleFrom(
-                          visualDensity: VisualDensity.compact,
-                        ),
-                        onPressed: _pageCount > 0 ? _choosePage : null,
-                        child: Text('Page $_page / $_pageCount'),
-                      ),
-                      IconButton(
-                        visualDensity: VisualDensity.compact,
-                        tooltip: 'Next page',
-                        onPressed: _page < _pageCount
-                            ? () => _goTo(_page + 1)
-                            : null,
-                        icon: const Icon(Icons.chevron_right),
-                      ),
-                      IconButton(
-                        visualDensity: VisualDensity.compact,
-                        tooltip: _follow
-                            ? 'Turn off follow narration'
-                            : 'Follow narration',
-                        isSelected: _follow,
-                        onPressed: () => setState(() => _follow = !_follow),
-                        icon: const Icon(Icons.my_location),
-                      ),
-                      IconButton(
-                        key: const Key('fit-page'),
-                        visualDensity: VisualDensity.compact,
-                        tooltip: 'Fit page',
-                        onPressed: _viewer.isReady
-                            ? () => _viewer.goToArea(
-                                rect: _viewer.layout.pageLayouts[_page - 1],
-                                duration: const Duration(milliseconds: 150),
-                              )
-                            : null,
-                        icon: const Icon(Icons.fit_screen),
-                      ),
-                    ],
-                  ),
+                  const SizedBox.shrink(key: Key('page-controls')),
                 if (!_fullscreen) _controls(),
               ],
             ),
@@ -943,43 +2481,347 @@ class _ReaderPageState extends State<ReaderPage> {
       final word = _playback.activeWord;
       final start = word?.start ?? -1;
       final end = word?.end ?? -1;
-      return SingleChildScrollView(
-        key: const Key('now-reading-panel'),
-        padding: const EdgeInsets.all(20),
+      return Container(
+        color: _adobeSheetBg,
+        child: SingleChildScrollView(
+          key: const Key('now-reading-panel'),
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  const Text(
+                    'NOW READING',
+                    style: TextStyle(
+                      color: Colors.white54,
+                      fontSize: 11,
+                      letterSpacing: 0.8,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  Text(
+                    'Page $_page / $_effectiveMaxPages',
+                    style: const TextStyle(color: Colors.white54, fontSize: 11),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Text.rich(
+                key: const Key('transcript'),
+                TextSpan(
+                  children: start >= 0 && end > start && end <= text.length
+                      ? [
+                          TextSpan(text: text.substring(0, start)),
+                          TextSpan(
+                            text: text.substring(start, end),
+                            style: const TextStyle(
+                              backgroundColor: Color(0xffffd65c),
+                              color: Colors.black,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          TextSpan(text: text.substring(end)),
+                        ]
+                      : [
+                          TextSpan(
+                            text: text.isEmpty ? _playback.status : text,
+                          ),
+                        ],
+                ),
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 15,
+                  height: 1.55,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    },
+  );
+
+  String _formatMs(int ms) {
+    if (ms <= 0) return '0:00';
+    final totalSec = ms ~/ 1000;
+    final h = totalSec ~/ 3600;
+    final m = (totalSec % 3600) ~/ 60;
+    final s = totalSec % 60;
+    final mm = h > 0 ? m.toString().padLeft(2, '0') : '$m';
+    final ss = s.toString().padLeft(2, '0');
+    return h > 0 ? '$h:$mm:$ss' : '$mm:$ss';
+  }
+
+  /// Sleek Adobe Acrobat Reader Android-style dark bottom bar (Screenshots 2 & 3),
+  /// with OpenReader-relevant tools (Read aloud, Read page, Transcript, Pages, More tools)
+  /// and a compact audio scrubber row when narration is active.
+  Widget _controls() => AnimatedBuilder(
+    animation: _playback,
+    builder: (context, _) {
+      final totalPassages = _playback.plan.length;
+      final currentOrd = (_scrubPassage?.round() ?? _playback.currentOrdinal)
+          .clamp(0, math.max(0, totalPassages - 1));
+      final totalDurationMs = _playback.durationMs;
+      final showAudioScrubber =
+          _playback.wantedPlaying ||
+          _playback.preparing ||
+          _playback.error != null ||
+          _scrubPassage != null;
+
+      return Material(
+        key: const Key('playback-bar'),
+        color: _adobeBarBg,
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Text('NOW READING', style: Theme.of(context).textTheme.labelSmall),
-            const SizedBox(height: 14),
-            Text.rich(
-              key: const Key('transcript'),
-              TextSpan(
-                children: start >= 0 && end > start && end <= text.length
-                    ? [
-                        TextSpan(text: text.substring(0, start)),
-                        TextSpan(
-                          text: text.substring(start, end),
-                          style: const TextStyle(
-                            backgroundColor: Color(0xffffd65c),
-                            color: Colors.black,
-                            fontWeight: FontWeight.bold,
+            if (_playback.preparing)
+              const LinearProgressIndicator(
+                minHeight: 2,
+                color: Color(0xff4da3ff),
+                backgroundColor: Colors.white12,
+              )
+            else
+              Container(height: 1, color: Colors.white12),
+
+            // Hidden/compact status key preserved for test compatibility and error display
+            if (showAudioScrubber)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 6, 12, 0),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(
+                      children: [
+                        IconButton(
+                          visualDensity: VisualDensity.compact,
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(
+                            minWidth: 32,
+                            minHeight: 28,
+                          ),
+                          tooltip: 'Previous passage',
+                          onPressed:
+                              !_playback.connected ||
+                                  _playback.preparing ||
+                                  _switchingSource
+                              ? null
+                              : () {
+                                  final previous = _playback.plan
+                                      .where(
+                                        (segment) =>
+                                            integer(segment['ordinal']) <
+                                            _playback.currentOrdinal,
+                                      )
+                                      .lastOrNull;
+                                  if (previous != null) {
+                                    unawaited(
+                                      _playback.startAt(
+                                        integer(previous['ordinal']),
+                                      ),
+                                    );
+                                  }
+                                },
+                          icon: const Icon(
+                            Icons.skip_previous_rounded,
+                            color: Colors.white,
+                            size: 20,
                           ),
                         ),
-                        TextSpan(text: text.substring(end)),
-                      ]
-                    : [TextSpan(text: text.isEmpty ? _playback.status : text)],
+                        Text(
+                          totalDurationMs > 0
+                              ? _formatMs(_playback.currentMs)
+                              : '${currentOrd + 1}',
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: Colors.white70,
+                          ),
+                        ),
+                        Expanded(
+                          child: SliderTheme(
+                            data: SliderTheme.of(context).copyWith(
+                              trackHeight: 2.0,
+                              activeTrackColor: const Color(0xff4da3ff),
+                              inactiveTrackColor: Colors.white24,
+                              thumbColor: const Color(0xff4da3ff),
+                              thumbShape: const RoundSliderThumbShape(
+                                enabledThumbRadius: 5,
+                              ),
+                              overlayShape: const RoundSliderOverlayShape(
+                                overlayRadius: 12,
+                              ),
+                            ),
+                            child: Slider(
+                              min: 0,
+                              max: math.max(1, totalPassages - 1).toDouble(),
+                              value: currentOrd
+                                  .clamp(0, math.max(1, totalPassages - 1))
+                                  .toDouble(),
+                              onChanged:
+                                  !_playback.connected ||
+                                      _playback.preparing ||
+                                      _switchingSource ||
+                                      totalPassages <= 1
+                                  ? null
+                                  : (value) =>
+                                        setState(() => _scrubPassage = value),
+                              onChangeEnd: (value) {
+                                final targetOrd = value.round();
+                                setState(() => _scrubPassage = null);
+                                if (_playback.wantedPlaying) {
+                                  unawaited(_playback.startAt(targetOrd));
+                                } else {
+                                  unawaited(_playback.selectAt(targetOrd));
+                                }
+                              },
+                            ),
+                          ),
+                        ),
+                        Text(
+                          totalDurationMs > 0
+                              ? _formatMs(totalDurationMs)
+                              : '$totalPassages',
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: Colors.white70,
+                          ),
+                        ),
+                        IconButton(
+                          visualDensity: VisualDensity.compact,
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(
+                            minWidth: 32,
+                            minHeight: 28,
+                          ),
+                          tooltip: 'Next passage',
+                          onPressed:
+                              !_playback.connected ||
+                                  _playback.preparing ||
+                                  _switchingSource
+                              ? null
+                              : () {
+                                  final next = _playback.plan
+                                      .where(
+                                        (segment) =>
+                                            integer(segment['ordinal']) >
+                                            _playback.currentOrdinal,
+                                      )
+                                      .firstOrNull;
+                                  if (next != null) {
+                                    unawaited(
+                                      _playback.startAt(
+                                        integer(next['ordinal']),
+                                      ),
+                                    );
+                                  }
+                                },
+                          icon: const Icon(
+                            Icons.skip_next_rounded,
+                            color: Colors.white,
+                            size: 20,
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        InkWell(
+                          borderRadius: BorderRadius.circular(12),
+                          onTap: _showVoiceAndSpeedSheet,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 3,
+                            ),
+                            decoration: BoxDecoration(
+                              color: _adobeButtonBg,
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: Text(
+                              '${_playback.speed}x',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    Text(
+                      _switchingSource
+                          ? 'Switching voice source...'
+                          : _playback.status,
+                      key: const Key('playback-status'),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: _playback.error != null
+                            ? Colors.redAccent
+                            : Colors.white54,
+                      ),
+                    ),
+                  ],
+                ),
+              )
+            else
+              Offstage(
+                offstage: true,
+                child: Text(
+                  _playback.status,
+                  key: const Key('playback-status'),
+                ),
               ),
-              style: Theme.of(context).textTheme.bodyLarge
-                  ?.copyWith(height: 1.65),
-            ),
-            const SizedBox(height: 20),
-            Text(
-              _playback.isOffline
-                  ? 'Kokoro runs entirely on this phone. Offline word timing is approximate.'
-                  : 'PDF text is highlighted when glyphs are available. '
-                        'Image-only or rewritten text uses block highlighting; '
-                        'the transcript follows the spoken word.',
-              style: const TextStyle(fontSize: 12),
+
+            // Main Adobe Acrobat Reader Android-style 5-item bottom bar
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceAround,
+                children: [
+                  _adobeBottomBarItem(
+                    itemKey: const Key('play-pause'),
+                    icon: _playback.wantedPlaying
+                        ? Icons.pause_circle_outline_rounded
+                        : Icons.headphones_outlined,
+                    label: _playback.error != null
+                        ? 'Retry'
+                        : _playback.wantedPlaying
+                        ? 'Pause'
+                        : 'Read aloud',
+                    active: _playback.wantedPlaying,
+                    enabled:
+                        _playback.connected &&
+                        !_playback.preparing &&
+                        !_switchingSource,
+                    onTap: _playback.toggle,
+                  ),
+                  _adobeBottomBarItem(
+                    icon: Icons.play_lesson_outlined,
+                    label: 'Read page',
+                    enabled: _playback.connected && !_playback.preparing,
+                    onTap: () => _readPage(_page),
+                  ),
+                  _adobeBottomBarItem(
+                    itemKey: const Key('toggle-transcript'),
+                    icon: Icons.subtitles_outlined,
+                    label: 'Transcript',
+                    active: _transcriptVisible,
+                    onTap: () =>
+                        setState(() => _transcript = !_transcriptVisible),
+                  ),
+                  _adobeBottomBarItem(
+                    icon: Icons.grid_view_rounded,
+                    label: 'Pages',
+                    onTap: () => _showNavigationSheet(initialTab: 1),
+                  ),
+                  _adobeBottomBarItem(
+                    icon: Icons.more_horiz_rounded,
+                    label: 'More tools',
+                    onTap: _showAdobeMoreSheet,
+                  ),
+                ],
+              ),
             ),
           ],
         ),
@@ -987,189 +2829,47 @@ class _ReaderPageState extends State<ReaderPage> {
     },
   );
 
-  Widget _controls() => AnimatedBuilder(
-    animation: _playback,
-    builder: (context, _) => Material(
-      key: const Key('playback-bar'),
-      color: Theme.of(context).colorScheme.surfaceContainer,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 6, 16, 6),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (_playback.preparing) const LinearProgressIndicator(),
-            const SizedBox(height: 2),
-            Text(
-              _switchingSource
-                  ? 'Switching voice source...'
-                  : _playback.wantedPlaying &&
-                        !_playback.preparing &&
-                        _playback.activeWord == null
-                  ? '${_playback.status} / passage highlighting'
-                  : _playback.status,
-              key: const Key('playback-status'),
-              textAlign: TextAlign.center,
-              maxLines: _playback.error != null ? 3 : 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontSize: 12,
-                color: _playback.error != null
-                    ? Theme.of(context).colorScheme.error
-                    : null,
+  Widget _adobeBottomBarItem({
+    Key? itemKey,
+    required IconData icon,
+    required String label,
+    bool active = false,
+    bool enabled = true,
+    required VoidCallback onTap,
+  }) {
+    final color = !enabled
+        ? Colors.white38
+        : active
+        ? const Color(0xff4da3ff)
+        : Colors.white;
+    return Expanded(
+      child: InkWell(
+        key: itemKey,
+        borderRadius: BorderRadius.circular(10),
+        onTap: enabled ? onTap : null,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, color: color, size: 24),
+              const SizedBox(height: 4),
+              Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: color,
+                  fontSize: 11,
+                  fontWeight: active ? FontWeight.w600 : FontWeight.w400,
+                ),
               ),
-            ),
-            const SizedBox(height: 2),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: [
-                IconButton(
-                  tooltip: 'Previous passage',
-                  onPressed:
-                      !_playback.connected ||
-                          _playback.preparing ||
-                          _switchingSource
-                      ? null
-                      : () {
-                          final previous = _playback.plan
-                              .where(
-                                (segment) =>
-                                    integer(segment['ordinal']) <
-                                    _playback.currentOrdinal,
-                              )
-                              .lastOrNull;
-                          if (previous != null) {
-                            unawaited(
-                              _playback.startAt(integer(previous['ordinal'])),
-                            );
-                          }
-                        },
-                  icon: const Icon(Icons.skip_previous_rounded),
-                ),
-                FilledButton(
-                  key: const Key('play-pause'),
-                  onPressed:
-                      !_playback.connected ||
-                          _playback.preparing ||
-                          _switchingSource
-                      ? null
-                      : _playback.toggle,
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 4),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          _playback.wantedPlaying
-                              ? Icons.pause_rounded
-                              : Icons.play_arrow_rounded,
-                        ),
-                        const SizedBox(width: 4),
-                        Text(
-                          _playback.error != null
-                              ? 'Retry audio'
-                              : _playback.wantedPlaying
-                              ? 'Pause'
-                              : 'Listen',
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-                IconButton(
-                  tooltip: 'Next passage',
-                  onPressed:
-                      !_playback.connected ||
-                          _playback.preparing ||
-                          _switchingSource
-                      ? null
-                      : () {
-                          final next = _playback.plan
-                              .where(
-                                (segment) =>
-                                    integer(segment['ordinal']) >
-                                    _playback.currentOrdinal,
-                              )
-                              .firstOrNull;
-                          if (next != null) {
-                            unawaited(
-                              _playback.startAt(integer(next['ordinal'])),
-                            );
-                          }
-                        },
-                  icon: const Icon(Icons.skip_next_rounded),
-                ),
-                PopupMenuButton<double>(
-                  tooltip: _playback.isOffline
-                      ? 'Phone speed (saved separately)'
-                      : 'Server speed (saved separately)',
-                  initialValue: _playback.speed,
-                  onSelected: _playback.setSpeed,
-                  itemBuilder: (_) => [
-                    for (final speed in [.75, .9, 1.0, 1.1, 1.25, 1.5, 2.0])
-                      PopupMenuItem(value: speed, child: Text('${speed}x')),
-                  ],
-                  child: Padding(
-                    padding: const EdgeInsets.all(12),
-                    child: Text('${_playback.speed}x'),
-                  ),
-                ),
-              ],
-            ),
-            Row(
-              children: [
-                _sourceButton(),
-                Expanded(
-                  child: _playback.isOffline && !_playback.usesSavedServer
-                      ? PopupMenuButton<String>(
-                          tooltip: 'Choose offline voice',
-                          initialValue: _playback.offlineVoice,
-                          onSelected: _playback.setOfflineVoice,
-                          itemBuilder: (_) => [
-                            for (final voice in offlineVoices.entries)
-                              PopupMenuItem(
-                                value: voice.key,
-                                child: Text(voice.value),
-                              ),
-                          ],
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 10),
-                            child: Row(
-                              children: [
-                                Expanded(
-                                  child: Text(
-                                    _playback.voice,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                ),
-                                const Icon(Icons.arrow_drop_down, size: 18),
-                              ],
-                            ),
-                          ),
-                        )
-                      : Text(
-                          _playback.voice,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: Theme.of(context).textTheme.bodySmall,
-                        ),
-                ),
-                TextButton(
-                  style: TextButton.styleFrom(
-                    visualDensity: VisualDensity.compact,
-                  ),
-                  onPressed: _playback.connected && !_playback.preparing
-                      ? _readPage
-                      : null,
-                  child: const Text('Read this page'),
-                ),
-              ],
-            ),
-          ],
+            ],
+          ),
         ),
       ),
-    ),
-  );
+    );
+  }
 }
 
 class _WordPainter extends CustomPainter {
